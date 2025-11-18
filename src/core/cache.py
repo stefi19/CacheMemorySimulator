@@ -1,0 +1,238 @@
+"""Core cache implementation with short, informal English comments.
+
+This file provides a simple set-associative cache model used by the
+simulator and UI. Comments are written like a student explaining the
+main ideas (short and informal), and the code is defensive against
+obvious bad inputs (like zero associativity or zero block size).
+
+Behavior contract (short):
+- Cache is composed of sets; each set has `associativity` ways.
+- Mapping: block_addr = address // block_size
+  set_index = block_addr % num_sets
+  tag = block_addr // num_sets
+- Access returns (hit:bool, set_index:int, way_index:Optional[int], evicted:Optional[CacheBlock], mem_read:bool, mem_write:bool)
+
+The replacement policy objects are expected to implement methods used by
+the UI/core: `.access(way_index)`, `.evict()` -> Optional[int], `.reset()`.
+If a policy method is missing, we catch exceptions and fallback safely.
+"""
+
+from dataclasses import dataclass
+from typing import Optional, List
+import time
+import random
+
+from src.core.replacement_policies import LRUReplacement, FIFOReplacement, RandomReplacement
+
+
+@dataclass
+class CacheBlock:
+    """Tiny container for a cache line (way).
+
+    Fields:
+    - tag: the tag stored in the line
+    - valid: whether the line currently holds useful data
+    - dirty: whether the line was written (for write-back)
+    - last_access_time / load_time: helpers used by policies like LRU/FIFO
+    """
+
+    tag: Optional[int] = None
+    valid: bool = False
+    dirty: bool = False
+    last_access_time: float = 0.0
+    load_time: float = 0.0
+
+
+class Cache:
+    """Simple set-associative cache model.
+    """
+
+    def __init__(
+        self,
+        num_blocks: int = 16,
+        block_size: int = 1,
+        associativity: int = 1,
+        replacement: str = "LRU",
+        write_policy: str = "write-through",
+        write_miss_policy: str = "write-allocate",
+    ):
+        # basic sanity checks and normalization
+        if associativity <= 0:
+            raise ValueError("associativity must be >= 1")
+        if num_blocks < 1:
+            num_blocks = 1
+        # make num_blocks divisible by associativity (round up)
+        if num_blocks % associativity != 0:
+            num_blocks += associativity - (num_blocks % associativity)
+
+        self.num_blocks = num_blocks
+        self.block_size = block_size if block_size > 0 else 1  # avoid /0
+        self.associativity = associativity
+        self.num_sets = max(1, num_blocks // associativity)
+        self.write_policy = write_policy
+        self.write_miss_policy = write_miss_policy
+
+        # keep the name (for debugging/tests) and instantiate one policy per set
+        self._replacement_name = replacement
+        self.replacement_policy_objs: List[object] = []
+        for _ in range(self.num_sets):
+            if replacement == "LRU":
+                self.replacement_policy_objs.append(LRUReplacement(self.associativity))
+            elif replacement == "FIFO":
+                self.replacement_policy_objs.append(FIFOReplacement(self.associativity))
+            elif replacement == "Random":
+                self.replacement_policy_objs.append(RandomReplacement(self.associativity))
+            else:
+                # unknown name -> fallback to LRU, it's safe
+                self.replacement_policy_objs.append(LRUReplacement(self.associativity))
+
+        # allocate the sets matrix: num_sets x associativity
+        self.sets: List[List[CacheBlock]] = [
+            [CacheBlock() for _ in range(self.associativity)] for _ in range(self.num_sets)
+        ]
+
+    def _decode(self, address: int):
+        """Decode address into (set_index, tag).
+
+        Defensive: use block_size >=1 and num_sets>=1 so we never divide by zero.
+        """
+
+        bs = self.block_size if self.block_size > 0 else 1
+        block_addr = address // bs
+        # num_sets should already be >=1, but be defensive
+        if self.num_sets <= 0:
+            return 0, block_addr
+        set_index = block_addr % self.num_sets
+        tag = block_addr // self.num_sets
+        return set_index, tag
+
+    def access(self, address: int, is_write: bool = False, write_miss_policy: Optional[str] = None):
+        """Perform a cache access.
+
+        Returns a tuple:
+        (hit: bool, set_index: int, way_index: Optional[int], evicted: Optional[CacheBlock], mem_read: bool, mem_write: bool)
+
+        - hit: whether the access hit in cache
+        - evicted: copy of the evicted block if eviction happened
+        - mem_read: True if a memory read was performed (e.g. on miss + allocate)
+        - mem_write: True if a memory write was performed (write-through or write-back eviction)
+        """
+
+        if write_miss_policy is None:
+            write_miss_policy = self.write_miss_policy
+
+        set_index, tag = self._decode(address)
+        cache_set = self.sets[set_index]
+
+        # search for hit
+        for wi, block in enumerate(cache_set):
+            if block.valid and block.tag == tag:
+                # hit: update timestamps and notify policy
+                now = time.time()
+                block.last_access_time = now
+                try:
+                    self.replacement_policy_objs[set_index].access(wi)
+                except Exception:
+                    # policy might be minimal; ignore if method missing
+                    pass
+
+                mem_read = False
+                mem_write = False
+                if is_write:
+                    if self.write_policy == "write-back":
+                        block.dirty = True
+                        mem_write = False
+                    else:
+                        # write-through -> immediate mem write
+                        mem_write = True
+                return True, set_index, wi, None, mem_read, mem_write
+
+        # miss handling
+        if is_write and write_miss_policy in ("no-write-allocate", "no-allocate", "write-no-allocate"):
+            # don't allocate on write miss: write directly to memory
+            return False, set_index, None, None, False, True
+
+        # try to find a free way (fast path)
+        for wi, block in enumerate(cache_set):
+            if not block.valid:
+                # fill this way
+                now = time.time()
+                block.tag = tag
+                block.valid = True
+                block.dirty = is_write and (self.write_policy == "write-back")
+                block.last_access_time = now
+                block.load_time = now
+                mem_read = True
+                mem_write = False
+                if is_write and self.write_policy == "write-through":
+                    mem_write = True
+                try:
+                    self.replacement_policy_objs[set_index].access(wi)
+                except Exception:
+                    pass
+                return False, set_index, wi, None, mem_read, mem_write
+
+        # need to evict: ask policy for a victim index
+        victim_index = None
+        try:
+            victim_index = self.replacement_policy_objs[set_index].evict()
+        except Exception:
+            victim_index = None
+
+        # fallback: choose LRU by last_access_time
+        if victim_index is None or not (0 <= victim_index < len(cache_set)):
+            victim_index = min(range(len(cache_set)), key=lambda i: cache_set[i].last_access_time)
+
+        victim = cache_set[victim_index]
+        # make a copy of the evicted block for reporting
+        evicted = CacheBlock(
+            tag=victim.tag,
+            valid=victim.valid,
+            dirty=victim.dirty,
+            last_access_time=victim.last_access_time,
+            load_time=victim.load_time,
+        )
+
+        mem_write = False
+        if evicted and evicted.dirty and self.write_policy == "write-back":
+            # dirty victim must be written back
+            mem_write = True
+
+        # place the new block into victim slot
+        now = time.time()
+        victim.tag = tag
+        victim.valid = True
+        victim.dirty = is_write and (self.write_policy == "write-back")
+        victim.last_access_time = now
+        victim.load_time = now
+        try:
+            self.replacement_policy_objs[set_index].access(victim_index)
+        except Exception:
+            pass
+
+        mem_read = True
+        if is_write and self.write_policy == "write-through":
+            mem_write = True
+
+        return False, set_index, victim_index, evicted, mem_read, mem_write
+
+    def reset(self):
+        """Clear cache contents and reset replacement policies.
+
+        This is useful between multiple simulation runs.
+        """
+
+        for s in self.sets:
+            for b in s:
+                b.tag = None
+                b.valid = False
+                b.dirty = False
+                b.last_access_time = 0.0
+                b.load_time = 0.0
+
+        for p in self.replacement_policy_objs:
+            try:
+                p.reset()
+            except Exception:
+                pass
+
