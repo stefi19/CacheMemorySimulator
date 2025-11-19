@@ -53,8 +53,8 @@ class UserInterface:
         # Animation and run controls
         self.num_passes = tk.IntVar(value=3)
         self.anim_speed = tk.IntVar(value=120)  # milliseconds per step
-        self.display_hex = tk.BooleanVar(value=True)
-        self.fast_mode = tk.BooleanVar(value=False)
+        # removed display_hex and fast_mode checkboxes per user request
+        # (these UI toggles were removed to simplify the interface)
         self.anim_cap = tk.IntVar(value=256)
         # state used by mapping mode
         self.dir = 0
@@ -220,9 +220,7 @@ class UserInterface:
         tk.Spinbox(self.configuration_container, from_=10, to=2000, increment=10, textvariable=self.anim_speed, width=8).grid(row=row_counter, column=1, sticky=tk.W)
         row_counter += 1
 
-        # Hex vs decimal toggle and fast mode
-        ttk.Checkbutton(self.configuration_container, text="Display tags as hex", variable=self.display_hex).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
-        ttk.Checkbutton(self.configuration_container, text="Fast mode", variable=self.fast_mode).grid(row=row_counter, column=1, sticky=tk.W, pady=3)
+        # Hex/fast toggles removed
         row_counter += 1
 
         # scenario code area (shows generated sequence/pseudocode)

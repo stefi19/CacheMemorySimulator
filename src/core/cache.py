@@ -56,7 +56,7 @@ class Cache:
         write_policy: str = "write-through",
         write_miss_policy: str = "write-allocate",
     ):
-        # basic sanity checks and normalization
+        # basic checks and normalization
         if associativity <= 0:
             raise ValueError("associativity must be >= 1")
         if num_blocks < 1:
@@ -83,7 +83,7 @@ class Cache:
             elif replacement == "Random":
                 self.replacement_policy_objs.append(RandomReplacement(self.associativity))
             else:
-                # unknown name -> fallback to LRU, it's safe
+                # unknown name -> fallback to LRU
                 self.replacement_policy_objs.append(LRUReplacement(self.associativity))
 
         # allocate the sets matrix: num_sets x associativity
@@ -114,7 +114,7 @@ class Cache:
 
         - hit: whether the access hit in cache
         - evicted: copy of the evicted block if eviction happened
-        - mem_read: True if a memory read was performed (e.g. on miss + allocate)
+        - mem_read: True if a memory read was performed
         - mem_write: True if a memory write was performed (write-through or write-back eviction)
         """
 
@@ -133,7 +133,7 @@ class Cache:
                 try:
                     self.replacement_policy_objs[set_index].access(wi)
                 except Exception:
-                    # policy might be minimal; ignore if method missing
+                    #ignore if method missing
                     pass
 
                 mem_read = False
@@ -143,7 +143,7 @@ class Cache:
                         block.dirty = True
                         mem_write = False
                     else:
-                        # write-through -> immediate mem write
+                        # write-through, so immediate mem write
                         mem_write = True
                 return True, set_index, wi, None, mem_read, mem_write
 
@@ -172,7 +172,7 @@ class Cache:
                     pass
                 return False, set_index, wi, None, mem_read, mem_write
 
-        # need to evict: ask policy for a victim index
+        # need to evict: ask policy for a victim
         victim_index = None
         try:
             victim_index = self.replacement_policy_objs[set_index].evict()
