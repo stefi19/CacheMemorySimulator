@@ -6,13 +6,18 @@ so students can follow how accesses map to hits/misses.
 """
 from typing import List, Tuple, Optional, Callable
 from .cache import Cache, CacheBlock
+from .ram import RAM
 from ..data.stats_export import Statistics
 
 
 class CacheSimulator:
-    def __init__(self, cache: Cache, stats: Optional[Statistics] = None):
+    def __init__(self, cache: Cache, stats: Optional[Statistics] = None, ram: Optional[RAM] = None):
         self.cache = cache
         self.stats = stats or Statistics()
+        # optional RAM backing store — if provided, cache misses/evictions
+        # that indicate memory reads/writes will be forwarded to this RAM
+        # object so the simulator models a backing store.
+        self.ram = ram
         self.sequence: List[Tuple[int, bool]] = []
         self.index = 0
 
@@ -47,8 +52,20 @@ class CacheSimulator:
 
         if mem_read:
             self.stats.memory_reads += 1
+            try:
+                if self.ram is not None:
+                    # perform a backing read (value unused here)
+                    self.ram.read(address)
+            except Exception:
+                pass
         if mem_write:
             self.stats.memory_writes += 1
+            try:
+                if self.ram is not None:
+                    # perform a backing write (store a placeholder value)
+                    self.ram.write(address, 1)
+            except Exception:
+                pass
 
         return {
             'address': address,
@@ -56,6 +73,8 @@ class CacheSimulator:
             'hit': hit,
             'set_index': set_index,
             'way_index': way_index,
+            'mem_read': mem_read,
+            'mem_write': mem_write,
             'stats': {
                 'accesses': self.stats.accesses,
                 'hits': self.stats.hits,

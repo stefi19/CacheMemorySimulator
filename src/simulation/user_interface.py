@@ -9,26 +9,24 @@ core packages. The run entrypoint (`run.py`) will import the UI from
 import tkinter as tk
 from tkinter import ttk, messagebox
 from src.simulation import Simulation
-from src.wrappers.direct_mapped_cache import Direct_mapped_cache
-from src.wrappers.fully_associative_cache import Fully_associative_cache
-from src.wrappers.two_way_set_associative_cache import Two_way_set_associative_cache
-from src.wrappers.four_way_set_associative_cache import Four_way_set_associative_cache
 from src.wrappers.k_associative_cache import K_associative_cache
 from src.data.stats_export import export_chart_json as se_export_chart_json, export_chart_pdf_from_canvas as se_export_chart_pdf_from_canvas
+from src.core.ram import RAM
 import math
 import json
 import io
 import os
 import tempfile
+import time
 from tkinter import filedialog
 
 # This UI is a big single class that wires the widgets to the cache wrappers.
 
 # Reasonable UI limits so users don't enter absurd numbers
-MAX_CACHE_SIZE = 4096
+MAX_CACHE_SIZE = 64
 MAX_LINE_SIZE = 1024
 MAX_ADDRESS_WIDTH = 32
-MAX_INPUT_TOKENS = 256
+MAX_INPUT_TOKENS = 64
 MIN_ANIM_SPEED = 1
 MAX_ANIM_SPEED = 5000
 
@@ -37,7 +35,8 @@ MAX_ANIM_SPEED = 5000
 # intentionally fixed so 'Run Simulation' will only run these predefined
 # scenarios. Manual input is handled by Read/Write buttons below.
 PREDEFINED_SCENARIOS = {
-    'Matrix Traversal': [(i * 4 + j, False) for i in range(4) for j in range(4)],
+    # increase matrix traversal to a 10x10 matrix (~100 addresses) per user request
+    'Matrix Traversal': [(i * 10 + j, False) for i in range(10) for j in range(10)],
     'Random Access': [(i * 7 + 3, False) for i in range(16)],
 }
 
@@ -71,6 +70,9 @@ class UserInterface:
         self.instuction = tk.StringVar(value="LOAD")
         # visible cache type (mirrored from algorithm buttons)
         self.cache_type = tk.StringVar(value="Direct-Mapped")
+        # live labels for internal counts (displayed under Cache title)
+        self.num_blocks_var = tk.StringVar(value='-')
+        self.num_sets_var = tk.StringVar(value='-')
         self.capacity = tk.IntVar(value=4)
         self.input = tk.StringVar(value="1,2,3")
         self.scenario_var = tk.StringVar(value='Matrix Traversal')
@@ -81,6 +83,9 @@ class UserInterface:
         # removed display_hex and fast_mode checkboxes per user request
         # (these UI toggles were removed to simplify the interface)
         self.anim_cap = tk.IntVar(value=256)
+        # RAM configuration (default to 64 bytes / lines window)
+        self.ram_size = tk.IntVar(value=64)
+        self.ram_obj = None
         # state used by mapping mode
         self.dir = 0
         self.binary_value = 0
@@ -96,6 +101,14 @@ class UserInterface:
         self._anim_results = []
         self.hit_rate_history = []
         self._after_id = None
+        # recent RAM accesses for temporary highlighting: list of (base_addr, is_write, expiry_ts)
+        self._recent_ram_accesses = []
+        # last computed mapping from cache frames to RAM base addresses
+        self._last_mapped_ram_bases = set()
+        # mapping label_index -> ram base address for animation
+        self._last_label_to_ram_base = {}
+        # ram canvas cell bounding boxes: base_addr -> (x1,y1,x2,y2)
+        self._ram_cell_bboxes = {}
         # last appended log line (used to prevent immediate duplicate debug lines)
         self._last_log_line = None
         # last debug message (separate from general last log) to avoid Text-wrapping artifacts
@@ -107,6 +120,17 @@ class UserInterface:
         # build UI
         self.setup_ui()
 
+        # Ensure RAM backing store exists and draw initial RAM view so the
+        # RAM panel isn't empty on first Run/start.
+        try:
+            self._ensure_ram_object()
+            try:
+                self.update_ram_display()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         # Watch parameter changes to re-validate and re-enable controls when fixed
         try:
             # trace_add available in modern tkinter; fall back to trace
@@ -114,11 +138,19 @@ class UserInterface:
                 self.cache_size.trace_add('write', lambda *a: self._on_params_changed())
                 self.line_size.trace_add('write', lambda *a: self._on_params_changed())
                 self.associativity.trace_add('write', lambda *a: self._on_params_changed())
+                try:
+                    self.ram_size.trace_add('write', lambda *a: self._on_ram_changed())
+                except Exception:
+                    pass
             except Exception:
                 try:
                     self.cache_size.trace('w', lambda *a: self._on_params_changed())
                     self.line_size.trace('w', lambda *a: self._on_params_changed())
                     self.associativity.trace('w', lambda *a: self._on_params_changed())
+                    try:
+                        self.ram_size.trace('w', lambda *a: self._on_ram_changed())
+                    except Exception:
+                        pass
                 except Exception:
                     pass
         except Exception:
@@ -207,13 +239,19 @@ class UserInterface:
 
         # Cache size and block size
         ttk.Label(self.configuration_container, text="Cache size:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
-        self.cache_size_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=1024, textvariable=self.cache_size, width=8)
+        self.cache_size_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=64, textvariable=self.cache_size, width=8)
         self.cache_size_spinbox.grid(row=row_counter, column=1, sticky=tk.W)
         row_counter += 1
 
         ttk.Label(self.configuration_container, text="Line size:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
         self.line_size_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=64, textvariable=self.line_size, width=8)
         self.line_size_spinbox.grid(row=row_counter, column=1, sticky=tk.W)
+        row_counter += 1
+
+        # RAM size
+        ttk.Label(self.configuration_container, text="RAM size (bytes):", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
+        self.ram_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=1048576, textvariable=self.ram_size, width=10)
+        self.ram_spinbox.grid(row=row_counter, column=1, sticky=tk.W)
         row_counter += 1
 
         # Replacement policy
@@ -233,19 +271,24 @@ class UserInterface:
         ttk.Label(self.configuration_container, text="Input (addr or action:addr e.g. R:0x10,W:32):", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
         inp_entry = tk.Entry(self.configuration_container, textvariable=self.input, width=entry_width)
         inp_entry.grid(row=row_counter, column=1)
-        # update decode panel in real-time as the user types
+        # keep a reference to the Entry so we can rebind events when needed
+        self.input_entry = inp_entry
+        # install bindings so decode panel updates when the user types
         try:
-            # trace_add available in Python 3.6+
-            self.input.trace_add('write', lambda *a: self.update_decode_panel())
+            self._ensure_input_bindings()
         except Exception:
+            # fallback: attempt minimal bindings inline
             try:
-                self.input.trace('w', lambda *a: self.update_decode_panel())
+                self.input.trace_add('write', lambda *a: self.update_decode_panel())
+            except Exception:
+                try:
+                    self.input.trace('w', lambda *a: self.update_decode_panel())
+                except Exception:
+                    pass
+            try:
+                inp_entry.bind('<KeyRelease>', lambda e: self.update_decode_panel())
             except Exception:
                 pass
-        try:
-            inp_entry.bind('<KeyRelease>', lambda e: self.update_decode_panel())
-        except Exception:
-            pass
         row_counter += 1
 
         # Manual read/write buttons (consume input tokens one at a time)
@@ -289,6 +332,12 @@ class UserInterface:
         # Display current cache type and replacement policy
         ttk.Label(self.configuration_container, text="Active cache:", font=(self.font_container, 10), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
         ttk.Label(self.configuration_container, textvariable=self.cache_type, font=(self.font_container, 10), foreground='#8BC34A', background=self.background_container).grid(row=row_counter, column=1, sticky=tk.W, pady=3)
+        row_counter += 1
+        # Active Replacement Policy label (shows which replacement is currently selected)
+        ttk.Label(self.configuration_container, text="Active Replacement Policy:", font=(self.font_container, 10), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
+        # create a label that we update via update_replacement_controls()
+        self.rep_policy_label = ttk.Label(self.configuration_container, text=self.replacement_policy.get(), font=(self.font_container, 10), foreground='#8BC34A', background=self.background_container)
+        self.rep_policy_label.grid(row=row_counter, column=1, sticky=tk.W, pady=3)
         row_counter += 1
 
         # Eviction log
@@ -362,7 +411,25 @@ class UserInterface:
         self.cache_display_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
         self.cache_display_frame.configure(style="InputFrame.TFrame")
 
-        self.create_frame_labels(self.capacity.get())
+        # small status row showing num_blocks / num_sets for quick debugging
+        try:
+            info_frame = ttk.Frame(container_right)
+            info_frame.grid(row=2, column=0, sticky='ne', pady=(0, 8), padx=(0, 8))
+            ttk.Label(info_frame, text='blocks:', font=(self.font_container, 9), foreground='#AAAAAA', background=self.background_container).grid(row=0, column=0, sticky='e')
+            ttk.Label(info_frame, textvariable=self.num_blocks_var, font=(self.font_container, 9, 'bold'), foreground='#8BC34A', background=self.background_container).grid(row=0, column=1, sticky='w', padx=(4, 12))
+            ttk.Label(info_frame, text='sets:', font=(self.font_container, 9), foreground='#AAAAAA', background=self.background_container).grid(row=0, column=2, sticky='e')
+            ttk.Label(info_frame, textvariable=self.num_sets_var, font=(self.font_container, 9, 'bold'), foreground='#8BC34A', background=self.background_container).grid(row=0, column=3, sticky='w', padx=(4, 0))
+        except Exception:
+            pass
+
+        # create frame labels based on number of blocks = cache_size // line_size
+        try:
+            raw_cache_size = max(1, int(self.cache_size.get()))
+            line_size = max(1, int(self.line_size.get()))
+            num_blocks = max(1, raw_cache_size // line_size)
+        except Exception:
+            num_blocks = max(1, int(self.capacity.get()))
+        self.create_frame_labels(num_blocks)
         try:
             self.update_replacement_controls()
         except Exception:
@@ -372,6 +439,24 @@ class UserInterface:
             self.update_replacement_panel()
         except Exception:
             pass
+
+        # RAM display panel (visualizes a small window into the backing store)
+        try:
+            self.ram_frame = ttk.LabelFrame(container_right, text="RAM (backing store)", padding=6)
+            self.ram_frame.grid(row=5, column=0, sticky='ew', pady=(8, 8))
+            # canvas will show a compact grid of line entries (addr:value)
+            self.ram_canvas = tk.Canvas(self.ram_frame, height=120, bg='#0b0b0b', highlightthickness=0)
+            self.ram_canvas.grid(row=0, column=0, sticky='ew')
+            # small scrollbar for canvas (optional)
+            try:
+                self.ram_vscroll = ttk.Scrollbar(self.ram_frame, orient='vertical', command=self.ram_canvas.yview)
+                self.ram_vscroll.grid(row=0, column=1, sticky='ns')
+                self.ram_canvas.configure(yscrollcommand=self.ram_vscroll.set)
+            except Exception:
+                self.ram_vscroll = None
+        except Exception:
+            self.ram_frame = None
+            self.ram_canvas = None
 
         # Legend
         legend = ttk.Frame(container_right, padding="4")
@@ -438,8 +523,9 @@ class UserInterface:
                 core._replacement_name = name
             except Exception:
                 pass
+        # Update the small replacement-policy label in the UI
         try:
-            self.update_replacement_panel()
+            self.update_replacement_controls()
         except Exception:
             pass
 
@@ -452,7 +538,7 @@ class UserInterface:
             if selection in PREDEFINED_SCENARIOS:
                 # Short human-friendly description
                 if selection == 'Matrix Traversal':
-                    self.scenario_code.insert('end', 'Matrix Traversal (predefined): sequential accesses over a 4x4 matrix\n\n')
+                    self.scenario_code.insert('end', 'Matrix Traversal (predefined): sequential accesses over a 10x10 matrix\n\n')
                 elif selection == 'Random Access':
                     self.scenario_code.insert('end', 'Random Access (predefined): fixed pseudo-random pattern\n\n')
                 # (previously had a third predefined scenario; removed)
@@ -700,6 +786,21 @@ class UserInterface:
     def create_frame_labels(self, capacity: int):
         """Create simple rectangular labels representing cache frames."""
         try:
+            # capacity is number of blocks (cache_size // line_size)
+            # enforce a hard UI limit of 20 labels to keep the layout usable
+            capacity = min(int(max(1, capacity)), 20)
+            # update live status labels showing number of blocks and sets
+            try:
+                self.num_blocks_var.set(str(int(capacity)))
+                assoc = max(1, int(self.associativity.get()))
+                sets = max(1, int(capacity) // assoc)
+                self.num_sets_var.set(str(int(sets)))
+            except Exception:
+                try:
+                    self.num_blocks_var.set('-')
+                    self.num_sets_var.set('-')
+                except Exception:
+                    pass
             # Clear previous
             for w in getattr(self, 'frame_labels', []):
                 try:
@@ -768,6 +869,16 @@ class UserInterface:
                             pass
             except Exception:
                 pass
+
+            # clear RAM display and optionally reset RAM object
+            try:
+                if getattr(self, 'ram_canvas', None):
+                    try:
+                        self.ram_canvas.delete('all')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -803,6 +914,9 @@ class UserInterface:
         """Parse input addresses, run the simulator (blocking) and update UI with results."""
         # Ensure a cache wrapper exists
         try:
+            # ensure UI params validated before running
+            if not self._ensure_valid_or_warn():
+                return
             # Only allow Run Simulation for predefined scenarios
             selection = self.scenario_var.get()
             if selection not in PREDEFINED_SCENARIOS:
@@ -821,9 +935,14 @@ class UserInterface:
                 self._append_log('No addresses to simulate')
                 return
 
-            # clamp UI values again and enforce token/address limits
+            # Validate UI values before running. Do not silently clamp critical fields;
+            # instead show an error and abort so the user can correct inputs.
             try:
-                self._clamp_ui_values()
+                ok = self._clamp_ui_values()
+                if ok is False:
+                    # _clamp_ui_values already showed an error message; abort run
+                    self._append_log('Run aborted due to invalid UI parameters')
+                    return
             except Exception:
                 pass
             # enforce token limit to avoid huge sequences
@@ -903,6 +1022,8 @@ class UserInterface:
     def step_animation(self):
         # Single-step: run only the next address
         try:
+            if not self._ensure_valid_or_warn():
+                return
             if not hasattr(self, 'cache') or self.cache is None:
                 self.apply_associativity()
             sim = None
@@ -927,6 +1048,19 @@ class UserInterface:
                     self.update_cache_display(info)
                 except Exception:
                     pass
+            # record RAM access (for highlighting) and refresh RAM display after this step
+            try:
+                if info and info.get('address') is not None:
+                    try:
+                        self._note_ram_access(info.get('address'), info.get('is_write'))
+                    except Exception:
+                        pass
+                try:
+                    self.update_ram_display()
+                except Exception:
+                    pass
+            except Exception:
+                pass
                 # update decode panel to reflect this stepped address as well
                 try:
                     addr = info.get('address')
@@ -973,6 +1107,19 @@ class UserInterface:
             self._update_stats_widgets(info.get('stats', {}))
             try:
                 self.update_cache_display(info)
+            except Exception:
+                pass
+            # record RAM access for UI highlighting and refresh RAM view
+            try:
+                if addr is not None:
+                    try:
+                        self._note_ram_access(addr, info.get('is_write'))
+                    except Exception:
+                        pass
+                    try:
+                        self.update_ram_display()
+                    except Exception:
+                        pass
             except Exception:
                 pass
             # update decode panel to reflect last access (do not change input field)
@@ -1161,6 +1308,9 @@ class UserInterface:
                 except Exception:
                     pass
 
+            # reset mapping cache (will be filled below if we can compute mapping)
+            mapped_bases = set()
+
             # Prefer wrapper cache_contents if present (direct mapped wrapper)
             if hasattr(wrapper, 'cache_contents') and getattr(wrapper, 'cache_contents'):
                 for i, line in enumerate(wrapper.cache_contents):
@@ -1179,7 +1329,145 @@ class UserInterface:
                     idx = int(set_idx) if set_idx is not None else None
                     if idx is not None and idx < len(self.frame_labels):
                         lbl = self.frame_labels[idx]
-                        lbl.configure(bg='#8BC34A' if info.get('hit') else '#F44336')
+                        is_hit = bool(info.get('hit'))
+                        color = '#8BC34A' if is_hit else '#F44336'
+                        lbl.configure(bg=color)
+                        # only color RAM when this access caused an actual memory read/write
+                        try:
+                            if info and (info.get('mem_read') or info.get('mem_write')):
+                                base = getattr(self, '_last_label_to_ram_base', {}).get(idx)
+                                if base is not None:
+                                    try:
+                                        self._note_ram_access_color(base, color)
+                                        self.update_ram_display()
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                # try to compute mapping into RAM if we can
+                try:
+                    # number of sets/blocks and line size
+                    nb = getattr(wrapper, 'num_blocks', None)
+                    if nb is None and hasattr(wrapper, 'cache'):
+                        nb = getattr(wrapper.cache, 'num_blocks', None)
+                    line_size = None
+                    if hasattr(wrapper, 'cache'):
+                        line_size = getattr(wrapper.cache, 'line_size', None)
+                    if line_size is None:
+                        try:
+                            line_size = max(1, int(self.line_size.get()))
+                        except Exception:
+                            line_size = 1
+                    # each entry in cache_contents: index -> tag
+                    for i, line in enumerate(wrapper.cache_contents):
+                        try:
+                            if line[1] == '1':
+                                t = line[2]
+                                try:
+                                    tag_int = int(t, 0)
+                                except Exception:
+                                    try:
+                                        tag_int = int(t)
+                                    except Exception:
+                                        tag_int = None
+                                if tag_int is not None and nb:
+                                    block_addr = tag_int * nb + i
+                                    base = block_addr * line_size
+                                    mapped_bases.add(base)
+                                    # record which cache label maps to this RAM base
+                                    try:
+                                        self._last_label_to_ram_base[i] = base
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                # store mapping and refresh RAM view
+                try:
+                    self._last_mapped_ram_bases = mapped_bases
+                    try:
+                        self.update_ram_display()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                # Animate RAM->cache load for a miss (core cache branch)
+                try:
+                    if info and (not info.get('hit', True)) and info.get('address') is not None:
+                        addr = int(info.get('address'))
+                        try:
+                            line_size = getattr(core, 'line_size', None) or max(1, int(self.line_size.get()))
+                        except Exception:
+                            line_size = max(1, int(self.line_size.get()))
+                        base = (addr // line_size) * line_size
+                        tgt_idx = None
+                        try:
+                            sidx = info.get('set_index')
+                            widx = info.get('way_index')
+                            if sidx is not None and widx is not None:
+                                try:
+                                    sidx = int(sidx); widx = int(widx)
+                                    tgt_idx = sidx * ways + widx
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        if tgt_idx is None:
+                            try:
+                                for k, b in getattr(self, '_last_label_to_ram_base', {}).items():
+                                    if b == base:
+                                        tgt_idx = k
+                                        break
+                            except Exception:
+                                pass
+                        try:
+                            if tgt_idx is not None:
+                                self._animate_ram_to_cache(base, tgt_idx)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                # Animate RAM->cache load for a miss (if address present and miss)
+                try:
+                    if info and (not info.get('hit', True)) and info.get('address') is not None:
+                        addr = int(info.get('address'))
+                        try:
+                            line_size = max(1, int(getattr(wrapper.cache, 'line_size', self.line_size.get())))
+                        except Exception:
+                            line_size = max(1, int(self.line_size.get()))
+                        base = (addr // line_size) * line_size
+                        # find target label index (prefer set_index/way_index if provided)
+                        tgt_idx = None
+                        try:
+                            sidx = info.get('set_index')
+                            widx = info.get('way_index')
+                            if sidx is not None and widx is not None:
+                                try:
+                                    sidx = int(sidx); widx = int(widx)
+                                    tgt_idx = sidx if tgt_idx is None else tgt_idx
+                                    # for direct mapped wrapper, set_index often equals label index
+                                    tgt_idx = int(sidx)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        # fallback: try to find any label mapping to this base
+                        if tgt_idx is None:
+                            try:
+                                for k, b in getattr(self, '_last_label_to_ram_base', {}).items():
+                                    if b == base:
+                                        tgt_idx = k
+                                        break
+                            except Exception:
+                                pass
+                        try:
+                            if tgt_idx is not None:
+                                self._animate_ram_to_cache(base, tgt_idx)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 return
@@ -1213,9 +1501,203 @@ class UserInterface:
                         label_index = sidx * ways + widx
                         if label_index < len(self.frame_labels):
                             lbl = self.frame_labels[label_index]
-                            lbl.configure(bg='#8BC34A' if info.get('hit') else '#F44336')
+                            is_hit = bool(info.get('hit'))
+                            color = '#8BC34A' if is_hit else '#F44336'
+                            lbl.configure(bg=color)
+                            # sync RAM highlight for mapped base if available
+                            try:
+                                # only color RAM when this access actually touched memory
+                                if info and (info.get('mem_read') or info.get('mem_write')):
+                                    base = getattr(self, '_last_label_to_ram_base', {}).get(label_index)
+                                    if base is not None:
+                                        try:
+                                            self._note_ram_access_color(base, color)
+                                            self.update_ram_display()
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
                 except Exception:
                     pass
+                # compute mapping from cache blocks to RAM base addresses
+                try:
+                    mapped_bases = set()
+                    line_size = getattr(core, 'line_size', None) or max(1, int(self.line_size.get()))
+                    num_sets = getattr(core, 'num_sets', None) or 1
+                    for s in range(rows):
+                        for w in range(ways):
+                            try:
+                                block = sets[s][w]
+                                if getattr(block, 'valid', False) and getattr(block, 'tag', None) is not None:
+                                    tag = int(block.tag)
+                                    block_addr = tag * num_sets + s
+                                    base = block_addr * line_size
+                                    mapped_bases.add(base)
+                                    # map label index (row-major) to ram base for animation
+                                    try:
+                                        label_index = s * ways + w
+                                        self._last_label_to_ram_base[label_index] = base
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                except Exception:
+                    mapped_bases = set()
+                try:
+                    self._last_mapped_ram_bases = mapped_bases
+                    try:
+                        self.update_ram_display()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def update_ram_display(self):
+        """Draw a compact view of the RAM backing store on the RAM canvas.
+
+        We show a small window of consecutive line-base addresses (0..N-1)
+        where each drawn cell shows the base address and the stored value
+        (if any). The view is bounded to avoid drawing thousands of entries.
+        """
+        try:
+            canvas = getattr(self, 'ram_canvas', None)
+            ram = getattr(self, 'ram_obj', None)
+            if canvas is None or ram is None:
+                return
+            canvas.delete('all')
+            # determine number of line entries to show (group by RAM.line_size)
+            try:
+                line = max(1, int(getattr(ram, 'line_size', 1)))
+            except Exception:
+                line = 1
+            try:
+                total_lines = max(1, ram.size // line)
+            except Exception:
+                total_lines = 1
+            MAX_LINES = 64
+            show_lines = min(MAX_LINES, total_lines)
+            # layout: columns x rows
+            cols = 8
+            rows = (show_lines + cols - 1) // cols
+            # canvas sizing
+            try:
+                w = int(canvas.winfo_width()) or 600
+            except Exception:
+                w = 600
+            try:
+                h = int(canvas.winfo_height()) or 120
+            except Exception:
+                h = 120
+            margin = 6
+            # compute per-cell width: avoid extremely wide cells by capping
+            raw_w = max(48, (w - 2 * margin) // cols)
+            cell_w = max(48, min(96, raw_w))
+            cell_h = max(12, (h - 2 * margin) // max(1, rows))
+            # if canvas is too short to show all rows, expand its height so all
+            # lines (up to MAX_LINES) are visible without clipping; otherwise
+            # configure scrollregion so the vertical scrollbar can scroll.
+            try:
+                needed_h = rows * cell_h + 2 * margin
+                if h < needed_h:
+                    try:
+                        canvas.config(height=needed_h)
+                        h = needed_h
+                    except Exception:
+                        pass
+                # always set scrollregion to cover the drawn area
+                try:
+                    canvas.configure(scrollregion=(0, 0, w, max(h, rows * cell_h + 2 * margin)))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # draw cells
+            # purge expired recent-access markers and build a map for fast lookup
+            try:
+                now = time.time()
+                self._recent_ram_accesses = [(b, w, e) for (b, w, e) in getattr(self, '_recent_ram_accesses', []) if e > now]
+            except Exception:
+                pass
+            recent_map = {}
+            try:
+                for (b, w, e) in getattr(self, '_recent_ram_accesses', []):
+                    # w may be a bool (is_write) or a color string
+                    if b not in recent_map:
+                        recent_map[b] = w
+                    else:
+                        # If existing entry is a color, keep it. If new is a color, prefer new.
+                        try:
+                            if isinstance(w, str):
+                                recent_map[b] = w
+                            else:
+                                # both bools: prefer write=True
+                                existing = recent_map[b]
+                                if isinstance(existing, str):
+                                    # keep color
+                                    pass
+                                else:
+                                    recent_map[b] = existing or w
+                        except Exception:
+                            recent_map[b] = w
+            except Exception:
+                recent_map = {}
+
+            for i in range(show_lines):
+                addr = i * line
+                try:
+                    val = ram.read(addr)
+                except Exception:
+                    val = 0
+                col = i % cols
+                row = i // cols
+                x = margin + col * cell_w
+                y = margin + row * cell_h
+                try:
+                    # choose background color: highlighted if recently accessed
+                    if addr in recent_map:
+                        marker = recent_map.get(addr)
+                        # marker may be color string or bool
+                        if isinstance(marker, str):
+                            fill = marker
+                            text_color = '#FFFFFF'
+                        else:
+                            is_write = bool(marker)
+                            fill = '#3E2F2F' if is_write else '#153B21'
+                            text_color = '#FFB4B4' if is_write else '#A8E6A1'
+                    else:
+                        fill = '#111111'
+                        text_color = '#DDDDDD'
+                    canvas.create_rectangle(x, y, x + cell_w - 4, y + cell_h - 4, fill=fill, outline='#333333')
+                    # store bbox for potential animation (x1,y1,x2,y2)
+                    try:
+                        self._ram_cell_bboxes[addr] = (x, y, x + cell_w - 4, y + cell_h - 4)
+                    except Exception:
+                        pass
+                    # if this RAM line maps to any cache frame, draw an outline to indicate mapping
+                    try:
+                        # show mapping outline only when this RAM line was recently
+                        # involved in a memory access (mem_read/mem_write). This
+                        # avoids always-highlighting mapped lines and follows the
+                        # user's request to only color on actual reads/writes.
+                        if addr in recent_map and getattr(self, '_last_mapped_ram_bases', None) and addr in self._last_mapped_ram_bases:
+                            canvas.create_rectangle(x+2, y+2, x + cell_w - 6, y + cell_h - 6, fill='', outline='#FFD54F', width=2)
+                    except Exception:
+                        pass
+                    # center the address text for better appearance when cells are narrow/wide
+                    canvas.create_text(x + (cell_w - 4) / 2, y + cell_h / 2, text=f"{addr:#04x}", fill='#8BC34A', font=(self.font_container, 9, 'bold'))
+                except Exception:
+                    pass
+            # ensure scrollbar is visible/updated
+            try:
+                if getattr(self, 'ram_vscroll', None):
+                    try:
+                        self.ram_vscroll.update()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1284,19 +1766,20 @@ class UserInterface:
     def direct_mapped_algorithm(self):
         self.associativity.set(1)
         self.cache_type.set('Direct-Mapped')
-        self.cache_wrapper = Direct_mapped_cache(self)
-        self.cache_wrapper.direct_mapped()
-        # also set self.cache for mapping single-step mode
-        self.cache = self.cache_wrapper
+        # Build generic k-associative wrapper with k=1
+        try:
+            self._ensure_ram_object()
+        except Exception:
+            pass
+        wrapper = K_associative_cache(self, associativity=1)
+        wrapper.build()
+        self.cache_wrapper = wrapper
+        # also set self.cache for compatibility with other code
+        self.cache = wrapper
         # create labels sized to the core cache's number of blocks if available
         try:
-            nb = getattr(self.cache, 'num_blocks', None) or (getattr(self.cache, 'num_blocks', None) if hasattr(self.cache, 'num_blocks') else None)
-            if nb is None and hasattr(self.cache, 'cache') and hasattr(self.cache.cache, 'num_blocks'):
-                nb = self.cache.cache.num_blocks
-            if nb is None and hasattr(self.cache, 'num_blocks'):
-                nb = self.cache.num_blocks
+            nb = getattr(self.cache, 'num_blocks', None) or (getattr(self.cache, 'cache').num_blocks if hasattr(self.cache, 'cache') else None)
             if nb is None:
-                # fallback: use UI cache_size as approximate
                 nb = max(1, int(self.cache_size.get()))
         except Exception:
             nb = max(1, int(self.cache_size.get()))
@@ -1312,13 +1795,26 @@ class UserInterface:
             pass
 
     def fully_associative_algorithm(self):
-        self.associativity.set(self.cache_size.get())
-        self.cache_type.set('Fully-Associative')
-        self.cache_wrapper = Fully_associative_cache(self)
-        self.cache_wrapper.fully_associative()
-        self.cache = self.cache_wrapper
+        # choose associativity equal to number of blocks where possible
         try:
-            nb = getattr(self.cache, 'num_blocks', None) or (self.cache.cache.num_blocks if hasattr(self.cache, 'cache') else None)
+            raw_cache_size = max(1, int(self.cache_size.get()))
+            line_size = max(1, int(self.line_size.get()))
+            num_blocks = max(1, raw_cache_size // line_size)
+            nb = num_blocks
+        except Exception:
+            nb = max(1, int(self.cache_size.get()))
+        self.associativity.set(nb)
+        self.cache_type.set('Fully-Associative')
+        try:
+            self._ensure_ram_object()
+        except Exception:
+            pass
+        wrapper = K_associative_cache(self, associativity=nb)
+        wrapper.build()
+        self.cache_wrapper = wrapper
+        self.cache = wrapper
+        try:
+            nb = getattr(self.cache, 'num_blocks', None) or (getattr(self.cache, 'cache').num_blocks if hasattr(self.cache, 'cache') else None)
             if nb is None:
                 nb = max(1, int(self.cache_size.get()))
         except Exception:
@@ -1337,11 +1833,16 @@ class UserInterface:
     def two_set_associative_algorithm(self):
         self.associativity.set(2)
         self.cache_type.set('2-Way Set')
-        self.cache_wrapper = Two_way_set_associative_cache(self)
-        self.cache_wrapper.two_way_set_associative()
-        self.cache = self.cache_wrapper
         try:
-            nb = getattr(self.cache, 'num_blocks', None) or (self.cache.cache.num_blocks if hasattr(self.cache, 'cache') else None)
+            self._ensure_ram_object()
+        except Exception:
+            pass
+        wrapper = K_associative_cache(self, associativity=2)
+        wrapper.build()
+        self.cache_wrapper = wrapper
+        self.cache = wrapper
+        try:
+            nb = getattr(self.cache, 'num_blocks', None) or (getattr(self.cache, 'cache').num_blocks if hasattr(self.cache, 'cache') else None)
             if nb is None:
                 nb = max(1, int(self.cache_size.get()))
         except Exception:
@@ -1360,11 +1861,16 @@ class UserInterface:
     def four_set_associative_algorithm(self):
         self.associativity.set(4)
         self.cache_type.set('4-Way Set')
-        self.cache_wrapper = Four_way_set_associative_cache(self)
-        self.cache_wrapper.four_way_set_associative()
-        self.cache = self.cache_wrapper
         try:
-            nb = getattr(self.cache, 'num_blocks', None) or (self.cache.cache.num_blocks if hasattr(self.cache, 'cache') else None)
+            self._ensure_ram_object()
+        except Exception:
+            pass
+        wrapper = K_associative_cache(self, associativity=4)
+        wrapper.build()
+        self.cache_wrapper = wrapper
+        self.cache = wrapper
+        try:
+            nb = getattr(self.cache, 'num_blocks', None) or (getattr(self.cache, 'cache').num_blocks if hasattr(self.cache, 'cache') else None)
             if nb is None:
                 nb = max(1, int(self.cache_size.get()))
         except Exception:
@@ -1386,9 +1892,13 @@ class UserInterface:
         This uses the generic K_associative_cache wrapper so the backend honors
         any k in the range [1, num_blocks].
         """
-        # clamp UI fields to reasonable limits before building cache
+        # Validate UI fields before building cache. Abort if invalid instead of
+        # silently clamping so the user can correct the inputs.
         try:
-            self._clamp_ui_values()
+            ok = self._clamp_ui_values()
+            if ok is False:
+                self._append_log('Apply aborted due to invalid UI parameters')
+                return
         except Exception:
             pass
         try:
@@ -1405,6 +1915,11 @@ class UserInterface:
             pass
         # Build K-associative wrapper
         try:
+            # ensure RAM backing store matches UI before building cache
+            try:
+                self._ensure_ram_object()
+            except Exception:
+                pass
             self.cache_type.set(f"{k}-Way Set" if k != 1 else 'Direct-Mapped')
             wrapper = K_associative_cache(self, associativity=k)
             wrapper.build()
@@ -1413,7 +1928,12 @@ class UserInterface:
             self.cache = wrapper
             # create UI frame labels according to number of blocks
             try:
-                nb = getattr(wrapper.cache, 'num_blocks', None) or max(1, int(self.cache_size.get()))
+                # compute number of blocks explicitly from UI fields to avoid
+                # accidental dependence on wrapper internals; associativity
+                # should not change the number of cache frames.
+                raw_cache_size = max(1, int(self.cache_size.get()))
+                line_size = max(1, int(self.line_size.get()))
+                nb = max(1, raw_cache_size // line_size)
             except Exception:
                 nb = max(1, int(self.cache_size.get()))
             self.create_frame_labels(nb)
@@ -1446,40 +1966,83 @@ class UserInterface:
         values are clamped so users see what happened.
         """
         try:
-            # cache size
+            # For critical cache parameters (cache_size, line_size, associativity,
+            # address_width) we prefer to reject invalid values and prompt the
+            # user to fix them rather than silently clamping.
             try:
                 cs = int(self.cache_size.get())
             except Exception:
                 cs = 1
             if cs < 1:
-                cs = 1
+                messagebox.showerror('Invalid parameter', 'Cache size must be >= 1')
+                try:
+                    self.cache_size_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
             if cs > MAX_CACHE_SIZE:
-                self._append_log(f"Cache size {cs} too large, clamped to {MAX_CACHE_SIZE}")
-                cs = MAX_CACHE_SIZE
-            self.cache_size.set(cs)
+                messagebox.showerror('Invalid parameter', f'Cache size must be <= {MAX_CACHE_SIZE}. Please change the value.')
+                try:
+                    self.cache_size_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
+
             # line/block size
             try:
                 bs = int(self.line_size.get())
             except Exception:
                 bs = 1
             if bs < 1:
-                bs = 1
+                messagebox.showerror('Invalid parameter', 'Line size must be >= 1')
+                try:
+                    self.line_size_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
             if bs > MAX_LINE_SIZE:
-                self._append_log(f"Line size {bs} too large, clamped to {MAX_LINE_SIZE}")
-                bs = MAX_LINE_SIZE
-            self.line_size.set(bs)
+                messagebox.showerror('Invalid parameter', f'Line size must be <= {MAX_LINE_SIZE}. Please change the value.')
+                try:
+                    self.line_size_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
+
+            # require cache_size to be multiple of line_size
+            if cs % bs != 0:
+                msg = f'Cache size ({cs}) is not an exact multiple of line size ({bs}). Please choose values where cache_size is a multiple of line_size.'
+                try:
+                    messagebox.showerror('Cache size / Line size mismatch', msg)
+                except Exception:
+                    pass
+                try:
+                    self.cache_size_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
+
             # address width
             try:
                 aw = int(self.address_width.get())
             except Exception:
                 aw = 1
             if aw < 1:
-                aw = 1
+                messagebox.showerror('Invalid parameter', 'Address width must be >= 1')
+                try:
+                    # if there is no direct widget, just log
+                    self._append_log('Address width invalid')
+                except Exception:
+                    pass
+                return False
             if aw > MAX_ADDRESS_WIDTH:
-                self._append_log(f"Address width {aw} too large, clamped to {MAX_ADDRESS_WIDTH}")
-                aw = MAX_ADDRESS_WIDTH
-            self.address_width.set(aw)
-            # anim speed clamp
+                messagebox.showerror('Invalid parameter', f'Address width must be <= {MAX_ADDRESS_WIDTH}. Please change the value.')
+                try:
+                    self._append_log('Address width too large')
+                except Exception:
+                    pass
+                return False
+
+            # anim speed clamp (non-critical) — clamp silently
             try:
                 s = int(self.anim_speed.get())
             except Exception:
@@ -1489,6 +2052,7 @@ class UserInterface:
             if s > MAX_ANIM_SPEED:
                 s = MAX_ANIM_SPEED
             self.anim_speed.set(s)
+
             # num_passes clamp (keep small)
             try:
                 p = int(self.num_passes.get())
@@ -1500,18 +2064,155 @@ class UserInterface:
                 self._append_log('Passes limited to 10')
                 p = 10
             self.num_passes.set(p)
-            # associativity cannot exceed number of blocks (clamped later in wrapper)
+
+            # associativity: ensure it is valid wrt number of blocks
             try:
                 assoc = int(self.associativity.get())
             except Exception:
                 assoc = 1
             if assoc < 1:
-                assoc = 1
-            # basic upper bound to prevent silly values
-            if assoc > max(1, cs):
-                self._append_log(f"Associativity {assoc} too large, clamped to {max(1, cs)}")
-                assoc = max(1, cs)
-            self.associativity.set(assoc)
+                messagebox.showerror('Invalid parameter', 'Associativity must be >= 1')
+                try:
+                    self.assoc_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
+            num_blocks = max(1, cs // bs)
+            # also enforce maximum UI blocks here to prevent generating too many
+            if num_blocks > 20:
+                try:
+                    messagebox.showerror('Too many blocks', f'Number of cache blocks ({num_blocks}) exceeds UI display limit (20). Please reduce cache_size or increase line_size.')
+                except Exception:
+                    pass
+                try:
+                    self.assoc_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
+            if assoc > num_blocks:
+                messagebox.showerror('Invalid parameter', f'Associativity ({assoc}) exceeds number of blocks ({num_blocks}). Please reduce associativity or change cache/line size.')
+                try:
+                    self.assoc_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
+            if num_blocks % assoc != 0:
+                messagebox.showerror('Invalid parameter', f'Associativity ({assoc}) does not divide the number of blocks ({num_blocks}). Please choose an associativity that evenly divides number of blocks.')
+                try:
+                    self.assoc_spinbox.focus_set()
+                except Exception:
+                    pass
+                return False
+
+            # everything critical validated
+            return True
+        except Exception:
+            return False
+
+    def _ensure_ram_object(self):
+        """Create or update the RAM backing-store object from current UI fields."""
+        try:
+            size = max(1, int(self.ram_size.get()))
+        except Exception:
+            size = 1024
+        try:
+            line = max(1, int(self.line_size.get()))
+        except Exception:
+            line = 1
+        try:
+            if getattr(self, 'ram_obj', None) is None:
+                self.ram_obj = RAM(size_bytes=size, line_size=line)
+            else:
+                # recreate if size changed
+                if getattr(self.ram_obj, 'size', None) != size or getattr(self.ram_obj, 'line_size', None) != line:
+                    self.ram_obj = RAM(size_bytes=size, line_size=line)
+        except Exception:
+            # best-effort: leave ram_obj None on failure
+            try:
+                self.ram_obj = None
+            except Exception:
+                pass
+
+    def _on_ram_changed(self, *args):
+        """Handler called when the RAM size spinbox changes.
+
+        Recreate the RAM backing store (if needed) and refresh the RAM view.
+        """
+        try:
+            # ensure the internal ram object matches the UI fields
+            self._ensure_ram_object()
+            # purge any recorded recent accesses (they may map to old size)
+            try:
+                self._recent_ram_accesses = []
+            except Exception:
+                pass
+            try:
+                self.update_ram_display()
+            except Exception:
+                pass
+            try:
+                size = getattr(self.ram_obj, 'size', None)
+                line = getattr(self.ram_obj, 'line_size', None)
+                if size is not None:
+                    self._append_log(f"RAM recreated: size={size} bytes, line_size={line}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _note_ram_access(self, addr: int, is_write: bool):
+        """Record a recent RAM access (base-aligned) for temporary highlighting.
+
+        We store tuples (base_addr, is_write, expiry_ts) and purge expired
+        entries during drawing.
+        """
+        try:
+            if addr is None or getattr(self, 'ram_obj', None) is None:
+                return
+            try:
+                line = max(1, int(getattr(self.ram_obj, 'line_size', 1)))
+            except Exception:
+                line = 1
+            base = (int(addr) // line) * line
+            # highlight duration synchronized with animation speed (anim_speed in ms)
+            # highlight duration: keep it short (1 second) so highlights are transient
+            expiry = time.time() + 1.0
+            # append and keep list small
+            try:
+                self._recent_ram_accesses.append((base, bool(is_write), expiry))
+            except Exception:
+                self._recent_ram_accesses = [(base, bool(is_write), expiry)]
+            # purge expired entries immediately to bound memory
+            now = time.time()
+            try:
+                self._recent_ram_accesses = [(b, w, e) for (b, w, e) in self._recent_ram_accesses if e > now]
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _note_ram_access_color(self, base: int, color: str, duration_ms: int = None):
+        """Record a recent RAM access with an explicit color string.
+
+        The color should be a CSS hex string like '#8BC34A' or '#F44336'.
+        Duration defaults to ~1.2 * anim_speed (same logic as _note_ram_access).
+        """
+        try:
+            if base is None or getattr(self, 'ram_obj', None) is None:
+                return
+            # fixed short duration for visual clarity: 1 second
+            expiry = time.time() + 1.0
+            try:
+                # store color string as second element; update_ram_display understands both bool and str
+                self._recent_ram_accesses.append((base, str(color), expiry))
+            except Exception:
+                self._recent_ram_accesses = [(base, str(color), expiry)]
+            # purge expired entries
+            now = time.time()
+            try:
+                self._recent_ram_accesses = [(b, w, e) for (b, w, e) in self._recent_ram_accesses if e > now]
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1561,11 +2262,170 @@ class UserInterface:
         except Exception:
             pass
 
+    def _animate_ram_to_cache(self, base_addr: int, label_index: int):
+        """Visualize a RAM -> cache load by highlighting the RAM cell and the cache label.
+
+        This is a lightweight animation: we draw a temporary outline around the
+        RAM cell and flash the destination cache label background for a short
+        duration determined by half the animation speed.
+        """
+        try:
+            canvas = getattr(self, 'ram_canvas', None)
+            if canvas is None:
+                return
+            bbox = getattr(self, '_ram_cell_bboxes', {}).get(base_addr)
+            rect_id = None
+            try:
+                if bbox:
+                    x1, y1, x2, y2 = bbox
+                    rect_id = canvas.create_rectangle(x1, y1, x2, y2, outline='#FFD54F', width=3)
+            except Exception:
+                rect_id = None
+
+            lbl = None
+            orig_bg = None
+            try:
+                if 0 <= int(label_index) < len(getattr(self, 'frame_labels', [])):
+                    lbl = self.frame_labels[int(label_index)]
+                    try:
+                        orig_bg = lbl.cget('bg')
+                    except Exception:
+                        orig_bg = None
+                    try:
+                        lbl.configure(bg='#FFD54F')
+                    except Exception:
+                        pass
+            except Exception:
+                lbl = None
+
+            def _clear_anim():
+                try:
+                    if rect_id is not None:
+                        try:
+                            canvas.delete(rect_id)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    if lbl is not None:
+                        try:
+                            if orig_bg is not None:
+                                lbl.configure(bg=orig_bg)
+                            else:
+                                lbl.configure(bg='#111111')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            try:
+                dur = max(200, int(self.anim_speed.get()) // 2)
+            except Exception:
+                dur = 400
+            try:
+                self.window.after(dur, _clear_anim)
+            except Exception:
+                _clear_anim()
+        except Exception:
+            pass
+
+    def _ensure_valid_or_warn(self) -> bool:
+        """Validate UI parameters and show a popup if invalid.
+
+        Returns True when parameters are valid, False otherwise.
+        """
+        try:
+            ok = self.validate_ui_params()
+            if not ok:
+                try:
+                    messagebox.showwarning('Invalid parameters', 'Please fix input parameters before running actions.')
+                except Exception:
+                    pass
+                return False
+            return True
+        except Exception:
+            try:
+                messagebox.showwarning('Invalid parameters', 'Please fix input parameters before running actions.')
+            except Exception:
+                pass
+            return False
+
+    def _ensure_input_bindings(self):
+        """Ensure the Input Entry has trace and key bindings so typing always updates the decode preview.
+
+        This is idempotent and safe to call multiple times; some tkinter versions
+        expose trace_add while others use trace('w'), so we attempt both.
+        """
+        try:
+            ent = getattr(self, 'input_entry', None)
+            if ent is None:
+                return
+            # variable trace
+            try:
+                # remove previous traces is tricky; we simply add a trace which is lightweight
+                self.input.trace_add('write', lambda *a: self.update_decode_panel())
+            except Exception:
+                try:
+                    self.input.trace('w', lambda *a: self.update_decode_panel())
+                except Exception:
+                    pass
+            # key event on the Entry itself
+            try:
+                ent.bind('<KeyRelease>', lambda e: self.update_decode_panel())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _on_params_changed(self):
         """Called when cache_size/line_size/associativity change to re-validate params."""
         try:
             ok = self.validate_ui_params()
+            # When line_size changes we need the RAM backing-store to reflect
+            # the new grouping. Recreate or adjust the RAM object and refresh
+            # the RAM and cache displays. _ensure_ram_object is idempotent and
+            # will only recreate when size/line_size actually change.
+            try:
+                self._ensure_ram_object()
+            except Exception:
+                pass
+            try:
+                # recompute cache->RAM mapping and redraw views
+                try:
+                    # update cache display (will call update_ram_display)
+                    self.update_cache_display({})
+                except Exception:
+                    try:
+                        self.update_ram_display()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             # validate_ui_params will enable controls if ok; if not, keep them disabled
+            # also update live block/set labels even if we didn't recreate frames
+            try:
+                try:
+                    raw_cache_size = max(1, int(self.cache_size.get()))
+                except Exception:
+                    raw_cache_size = 1
+                try:
+                    line_size = max(1, int(self.line_size.get()))
+                except Exception:
+                    line_size = 1
+                num_blocks = max(1, raw_cache_size // line_size)
+                try:
+                    assoc = max(1, int(self.associativity.get()))
+                except Exception:
+                    assoc = 1
+                num_sets = max(1, num_blocks // assoc)
+                try:
+                    self.num_blocks_var.set(str(int(num_blocks)))
+                    self.num_sets_var.set(str(int(num_sets)))
+                except Exception:
+                    pass
+            except Exception:
+                pass
             return ok
         except Exception:
             return False
@@ -1623,6 +2483,18 @@ class UserInterface:
 
         # compute number of blocks and warn if associativity > blocks
         num_blocks = max(1, cs // ls)
+        # UI display limit: refuse configurations that would create more than 20 blocks
+        if num_blocks > 20:
+            msg = f'Number of cache blocks ({num_blocks}) exceeds UI display limit (20).\nPlease reduce cache_size or increase line_size.'
+            try:
+                messagebox.showerror('Too many blocks', msg)
+            except Exception:
+                pass
+            try:
+                self._set_controls_enabled(False)
+            except Exception:
+                pass
+            return False
         if assoc > num_blocks:
             msg = f'Associativity ({assoc}) exceeds number of blocks ({num_blocks}). Please reduce associativity or increase cache/line size.'
             try:
@@ -1656,6 +2528,108 @@ class UserInterface:
         except Exception:
             pass
         return True
+
+    def _draw_ram_to_cache_arrow(self, base_addr: int, label_index: int, color: str = '#FFD54F', duration: int = 400):
+        """Draw a temporary arrow from the RAM cell (base_addr) to the cache label (label_index).
+
+        The arrow is drawn on a short-lived overlay canvas placed over the
+        cache/RAM right panel so it visually connects the two widgets.
+        """
+        try:
+            # need the source bbox (in ram_canvas coords)
+            canvas = getattr(self, 'ram_canvas', None)
+            lbl = None
+            try:
+                if 0 <= int(label_index) < len(getattr(self, 'frame_labels', [])):
+                    lbl = self.frame_labels[int(label_index)]
+            except Exception:
+                lbl = None
+            if canvas is None or lbl is None:
+                return
+
+            # parent for overlay: choose the common ancestor container where both
+            # ram_canvas and cache labels reside. cache_display_frame is in container_right,
+            # so use its parent (container_right) if available, else use self.window.
+            parent = getattr(self, 'cache_display_frame', None)
+            if parent is not None:
+                parent = parent.master or self.window
+            else:
+                parent = self.window
+
+            # ensure geometry info is up-to-date
+            try:
+                parent.update_idletasks()
+            except Exception:
+                pass
+
+            # compute parent origin (root coords)
+            try:
+                p_rootx = parent.winfo_rootx()
+                p_rooty = parent.winfo_rooty()
+            except Exception:
+                p_rootx = self.window.winfo_rootx()
+                p_rooty = self.window.winfo_rooty()
+
+            # source center: ram_canvas root + bbox center, then convert to parent coords
+            try:
+                r_rootx = canvas.winfo_rootx()
+                r_rooty = canvas.winfo_rooty()
+                bbox = getattr(self, '_ram_cell_bboxes', {}).get(base_addr)
+                if not bbox:
+                    return
+                x1, y1, x2, y2 = bbox
+                src_x = (r_rootx - p_rootx) + (x1 + x2) / 2
+                src_y = (r_rooty - p_rooty) + (y1 + y2) / 2
+            except Exception:
+                return
+
+            # destination center: label root coordinates converted to parent coords
+            try:
+                lbl_rootx = lbl.winfo_rootx()
+                lbl_rooty = lbl.winfo_rooty()
+                dst_x = (lbl_rootx - p_rootx) + lbl.winfo_width() / 2
+                dst_y = (lbl_rooty - p_rooty) + lbl.winfo_height() / 2
+            except Exception:
+                return
+
+            # create overlay canvas in parent
+            try:
+                ov = tk.Canvas(parent, width=parent.winfo_width() or 800, height=parent.winfo_height() or 400, bg=self.background_container, highlightthickness=0)
+                # place exactly over parent
+                ov.place(x=0, y=0, relwidth=1, relheight=1)
+                ov.lift()
+                # draw a smooth arrow
+                arrow_id = ov.create_line(src_x, src_y, dst_x, dst_y, fill=color, width=3, arrow='last', smooth=True)
+            except Exception:
+                try:
+                    ov = None
+                except Exception:
+                    ov = None
+                arrow_id = None
+
+            def _cleanup():
+                try:
+                    if ov is not None:
+                        try:
+                            ov.delete('all')
+                        except Exception:
+                            pass
+                        try:
+                            ov.place_forget()
+                        except Exception:
+                            try:
+                                ov.destroy()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+            try:
+                self.window.after(max(150, int(duration)), _cleanup)
+            except Exception:
+                _cleanup()
+        except Exception:
+            pass
 
     # --- Manual input consumption helpers ---
     def _prepare_manual_tokens(self):
@@ -1718,6 +2692,11 @@ class UserInterface:
             self._manual_tokens = []
             self._manual_index = 0
             self._manual_raw_tokens = []
+        # ensure input bindings are active after parsing user text
+        try:
+            self._ensure_input_bindings()
+        except Exception:
+            pass
 
     def _consume_manual_token(self, is_write: bool):
         """Consume next manual token and perform a single access (read or write).
@@ -1725,6 +2704,8 @@ class UserInterface:
         Returns the info dict from the simulator step or None.
         """
         try:
+            if not self._ensure_valid_or_warn():
+                return None
             if not hasattr(self, 'cache') or self.cache is None:
                 self.apply_associativity()
             if not hasattr(self, '_manual_tokens') or not self._manual_tokens:
@@ -1758,6 +2739,18 @@ class UserInterface:
                     self.update_cache_display(info)
                 except Exception:
                     pass
+                # record RAM access (for highlighting) and refresh RAM display after manual access
+                try:
+                    try:
+                        self._note_ram_access(info.get('address'), info.get('is_write'))
+                    except Exception:
+                        pass
+                    try:
+                        self.update_ram_display()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
                 # update hit-rate history and redraw small chart (same logic as animation step)
                 try:
                     hr = info.get('stats', {}).get('hit_rate', None)
@@ -1784,6 +2777,21 @@ class UserInterface:
                     self.update_decode_panel()
                 except Exception:
                     pass
+            except Exception:
+                pass
+            # synchronize internal token state with the updated input so future
+            # calls re-parse the newly-typed tokens (prevents "No more manual tokens" when
+            # the input box still shows tokens).
+            try:
+                self._manual_raw_tokens = remaining
+                # clear parsed tokens so _prepare_manual_tokens will re-parse on next consume
+                self._manual_tokens = []
+                self._manual_index = 0
+            except Exception:
+                pass
+            # ensure bindings remain active so further typing is detected
+            try:
+                self._ensure_input_bindings()
             except Exception:
                 pass
             return info

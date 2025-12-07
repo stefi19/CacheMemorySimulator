@@ -4,10 +4,7 @@ Student-style: this is a tiny helper that converts UI inputs into a
 sequence of addresses and forwards them to the chosen cache wrapper.
 I kept the logic explicit so it's easy to follow.
 """
-from src.wrappers.direct_mapped_cache import Direct_mapped_cache
-from src.wrappers.two_way_set_associative_cache import Two_way_set_associative_cache
-from src.wrappers.four_way_set_associative_cache import Four_way_set_associative_cache
-from src.wrappers.fully_associative_cache import Fully_associative_cache
+from src.wrappers.k_associative_cache import K_associative_cache
 
 
 class Simulation:
@@ -24,19 +21,10 @@ class Simulation:
         if getattr(self, 'cache_wrapper', None) is not None:
             return
         assoc = int(self.ui.associativity.get())
-        if assoc == 1:
-            self.cache_wrapper = Direct_mapped_cache(self.ui)
-            self.cache_wrapper.direct_mapped()
-        elif assoc == 2:
-            self.cache_wrapper = Two_way_set_associative_cache(self.ui)
-            self.cache_wrapper.two_way_set_associative()
-        elif assoc == 4:
-            self.cache_wrapper = Four_way_set_associative_cache(self.ui)
-            self.cache_wrapper.four_way_set_associative()
-        else:
-            # fallback to fully associative
-            self.cache_wrapper = Fully_associative_cache(self.ui)
-            self.cache_wrapper.fully_associative()
+        # Use the generic K-associative wrapper for all associativities.
+        wrapper = K_associative_cache(self.ui, associativity=assoc)
+        wrapper.build()
+        self.cache_wrapper = wrapper
 
     def run_simulation(self, num_passes: int = 1):
         # Create cache wrapper according to UI if not already present.
@@ -108,8 +96,8 @@ class Simulation:
     def _generate_sequence_for_scenario(self, name: str):
         # Produce a list of hex strings (or integers) for predefined scenarios
         if name == 'Matrix Traversal':
-            # use a smaller matrix to keep scenario short and fast
-            N = 4
+            # use a larger matrix (10x10 => ~100 addresses) per user preference
+            N = 10
             seq = []
             for i in range(N):
                 for j in range(N):

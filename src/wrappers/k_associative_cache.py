@@ -44,7 +44,8 @@ class K_associative_cache:
         self.cache = Cache(num_blocks=num_blocks, line_size=line_size, associativity=associativity,
                            replacement=replacement, write_policy=write_policy,
                            write_miss_policy=self.ui.write_miss_policy.get())
-        self.sim = CacheSimulator(self.cache)
+        # forward optional RAM from UI
+        self.sim = CacheSimulator(self.cache, ram=getattr(self.ui, 'ram_obj', None))
 
     def load_instruction(self, binary_value, hex_value):
         try:
