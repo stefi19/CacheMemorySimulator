@@ -11,7 +11,7 @@ from src.core.simulator import CacheSimulator
 
 def headless_test():
     # Simple scenario to validate cache logic
-    cache = Cache(num_blocks=8, block_size=1, associativity=2, replacement='LRU', write_policy='write-back')
+    cache = Cache(num_blocks=8, line_size=1, associativity=2, replacement='LRU', write_policy='write-back')
     sim = CacheSimulator(cache)
     # small sequence with repetitions to force hits/misses
     seq = [0,1,2,3,0,1,4,5,0,1,6,7]
@@ -30,7 +30,7 @@ def main():
     if '--nogui' in sys.argv:
         headless_test()
     else:
-        # Import the polished UI (moved under src.simulation)
+        # Import the UI
         from src.simulation.user_interface import run_ui
         run_ui()
 

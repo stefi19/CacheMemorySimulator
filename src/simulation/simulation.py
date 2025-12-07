@@ -16,6 +16,13 @@ class Simulation:
         self.cache_wrapper = None
 
     def _create_cache_from_ui(self):
+        # Only create a cache wrapper if one does not already exist. This
+        # preserves replacement-policy state and other cache internals across
+        # multiple calls to run_simulation. If the UI wants to rebuild the
+        # cache (e.g. after Apply/Reset) it should clear or replace
+        # `self.cache_wrapper` explicitly.
+        if getattr(self, 'cache_wrapper', None) is not None:
+            return
         assoc = int(self.ui.associativity.get())
         if assoc == 1:
             self.cache_wrapper = Direct_mapped_cache(self.ui)
@@ -32,7 +39,9 @@ class Simulation:
             self.cache_wrapper.fully_associative()
 
     def run_simulation(self, num_passes: int = 1):
-        # Create cache wrapper according to UI
+        # Create cache wrapper according to UI if not already present.
+        # This preserves state (replacement policy metadata, dirty bits,
+        # etc.) across multiple traversals of predefined scenarios.
         self._create_cache_from_ui()
         # If the UI has an explicit input string, use it; otherwise, generate sequence from selected scenario
         seq_str = self.ui.input.get().strip()
@@ -99,7 +108,8 @@ class Simulation:
     def _generate_sequence_for_scenario(self, name: str):
         # Produce a list of hex strings (or integers) for predefined scenarios
         if name == 'Matrix Traversal':
-            N = 8
+            # use a smaller matrix to keep scenario short and fast
+            N = 4
             seq = []
             for i in range(N):
                 for j in range(N):
@@ -107,11 +117,13 @@ class Simulation:
             return seq
         elif name == 'Random Access':
             import random
-            return [format(random.randint(0, 255), 'x') for _ in range(128)]
+            # fewer random accesses to ensure the scenario runs quickly
+            return [format(random.randint(0, 255), 'x') for _ in range(16)]
         else:
-            # Instruction/Data Parallel: interleave instruction and data streams
-            instr = list(range(0, 64))
-            data = [100 + (i % 16) for i in range(64)]
+            # Fallback generator: interleave two small sequences (instructions and data)
+            # use smaller lengths so fallback scenarios are short
+            instr = list(range(0, 32))
+            data = [100 + (i % 8) for i in range(32)]
             seq = []
             for i in range(max(len(instr), len(data))):
                 if i < len(instr):

@@ -7,7 +7,7 @@ obvious bad inputs (like zero associativity or zero block size).
 
 Behavior contract (short):
 - Cache is composed of sets; each set has `associativity` ways.
-- Mapping: block_addr = address // block_size
+    - Mapping: block_addr = address // line_size
   set_index = block_addr % num_sets
   tag = block_addr // num_sets
 - Access returns (hit:bool, set_index:int, way_index:Optional[int], evicted:Optional[CacheBlock], mem_read:bool, mem_write:bool)
@@ -50,7 +50,7 @@ class Cache:
     def __init__(
         self,
         num_blocks: int = 16,
-        block_size: int = 1,
+        line_size: int = 1,
         associativity: int = 1,
         replacement: str = "LRU",
         write_policy: str = "write-through",
@@ -61,12 +61,19 @@ class Cache:
             raise ValueError("associativity must be >= 1")
         if num_blocks < 1:
             num_blocks = 1
-        # make num_blocks divisible by associativity (round up)
+        # Do not change total number of blocks to satisfy associativity.
+        # Instead, if the requested associativity does not divide evenly into
+        # num_blocks, reduce associativity to the largest divisor <= associativity.
         if num_blocks % associativity != 0:
-            num_blocks += associativity - (num_blocks % associativity)
+            # find the largest divisor of num_blocks that is <= associativity
+            for a in range(min(associativity, num_blocks), 0, -1):
+                if num_blocks % a == 0:
+                    associativity = a
+                    break
 
         self.num_blocks = num_blocks
-        self.block_size = block_size if block_size > 0 else 1  # avoid /0
+        # rename: internal field now called line_size (formerly block_size)
+        self.line_size = line_size if line_size > 0 else 1  # avoid /0
         self.associativity = associativity
         self.num_sets = max(1, num_blocks // associativity)
         self.write_policy = write_policy
@@ -94,10 +101,11 @@ class Cache:
     def _decode(self, address: int):
         """Decode address into (set_index, tag).
 
-        Defensive: use block_size >=1 and num_sets>=1 so we never divide by zero.
+    Defensive: use line_size >=1 and num_sets>=1 so we never divide by zero.
         """
 
-        bs = self.block_size if self.block_size > 0 else 1
+        # use line_size internally
+        bs = self.line_size if self.line_size > 0 else 1
         block_addr = address // bs
         # num_sets should already be >=1, but be defensive
         if self.num_sets <= 0:

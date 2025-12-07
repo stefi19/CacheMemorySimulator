@@ -14,17 +14,17 @@ class Two_way_set_associative_cache:
         self.sim = None
 
     def two_way_set_associative(self):
-        block_size = max(1, int(self.ui.block_size.get()))
+        line_size = max(1, int(self.ui.line_size.get()))
         # cache_size from UI is total capacity; number of blocks = cache_size // block_size
         raw_cache_size = max(1, int(self.ui.cache_size.get()))
-        num_blocks = max(2, raw_cache_size // block_size)
+        num_blocks = max(2, raw_cache_size // line_size)
         write_policy = self.ui.write_hit_policy.get()
         replacement = self.ui.replacement_policy.get()
         associativity = 2
         # ensure number of blocks is divisible by associativity
         if num_blocks % associativity != 0:
             num_blocks += (associativity - (num_blocks % associativity))
-        self.cache = Cache(num_blocks=num_blocks, block_size=block_size, associativity=associativity,
+        self.cache = Cache(num_blocks=num_blocks, line_size=line_size, associativity=associativity,
                            replacement=replacement, write_policy=write_policy,
                            write_miss_policy=self.ui.write_miss_policy.get())
         self.sim = CacheSimulator(self.cache)

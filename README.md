@@ -4,7 +4,7 @@ Simple Python/Tkinter cache memory simulator.
 
 Features
 - Configurable cache size, block size, associativity (ways), replacement policy (LRU/FIFO/Random), write policy (write-through/write-back).
-- Three sample scenarios: Matrix Traversal, Random Access, Instruction/Data Parallel.
+- Two sample scenarios: Matrix Traversal, Random Access.
 - Live statistics: accesses, hits, misses, hit rate, memory reads/writes.
 
 Run GUI

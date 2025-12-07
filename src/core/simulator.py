@@ -28,7 +28,7 @@ class CacheSimulator:
             writes = [False] * len(addresses)
         self.sequence = list(zip(addresses, writes))
         self.index = 0
-        # student note: sequence is a list of (addr, is_write). We step
+        # sequence is a list of (addr, is_write). We step
         # through it with `step()` which advances self.index.
 
     def has_next(self) -> bool:

@@ -13,12 +13,33 @@ from src.wrappers.direct_mapped_cache import Direct_mapped_cache
 from src.wrappers.fully_associative_cache import Fully_associative_cache
 from src.wrappers.two_way_set_associative_cache import Two_way_set_associative_cache
 from src.wrappers.four_way_set_associative_cache import Four_way_set_associative_cache
+from src.wrappers.k_associative_cache import K_associative_cache
+from src.data.stats_export import export_chart_json as se_export_chart_json, export_chart_pdf_from_canvas as se_export_chart_pdf_from_canvas
 import math
+import json
+import io
+import os
+import tempfile
+from tkinter import filedialog
 
-# Student-style note: This UI is a big single class that wires the
-# widgets to the cache wrappers. I wrote short, informal comments so a
-# learner can follow what each part does without getting lost.
+# This UI is a big single class that wires the widgets to the cache wrappers.
 
+# Reasonable UI limits so users don't enter absurd numbers
+MAX_CACHE_SIZE = 4096
+MAX_LINE_SIZE = 1024
+MAX_ADDRESS_WIDTH = 32
+MAX_INPUT_TOKENS = 256
+MIN_ANIM_SPEED = 1
+MAX_ANIM_SPEED = 5000
+
+# Hardcoded scenario sequences (users cannot edit these sequences).
+# Each scenario maps to a list of (address, is_write) tuples. These are
+# intentionally fixed so 'Run Simulation' will only run these predefined
+# scenarios. Manual input is handled by Read/Write buttons below.
+PREDEFINED_SCENARIOS = {
+    'Matrix Traversal': [(i * 4 + j, False) for i in range(4) for j in range(4)],
+    'Random Access': [(i * 7 + 3, False) for i in range(16)],
+}
 
 class UserInterface:
     def __init__(self):
@@ -39,8 +60,11 @@ class UserInterface:
         # User input variables
         self.cache_size = tk.IntVar(value=16)
         self.address_width = tk.IntVar(value=6)
-        self.block_size = tk.IntVar(value=2)
+        self.line_size = tk.IntVar(value=2)
         self.associativity = tk.IntVar(value=1)
+        # show verbose decode debug messages in the eviction/log pane (removed checkbox)
+        # small status string showing applied/clamped values after Apply
+        self.effective_info = tk.StringVar(value='')
         self.write_hit_policy = tk.StringVar(value="write-back")
         self.write_miss_policy = tk.StringVar(value="write-allocate")
         self.replacement_policy = tk.StringVar(value="LRU")
@@ -52,7 +76,8 @@ class UserInterface:
         self.scenario_var = tk.StringVar(value='Matrix Traversal')
         # Animation and run controls
         self.num_passes = tk.IntVar(value=3)
-        self.anim_speed = tk.IntVar(value=120)  # milliseconds per step
+        # Fixed animation speed: 1000 ms (1 second) — user control removed
+        self.anim_speed = tk.IntVar(value=1000)  # milliseconds per step (fixed)
         # removed display_hex and fast_mode checkboxes per user request
         # (these UI toggles were removed to simplify the interface)
         self.anim_cap = tk.IntVar(value=256)
@@ -71,12 +96,33 @@ class UserInterface:
         self._anim_results = []
         self.hit_rate_history = []
         self._after_id = None
+        # last appended log line (used to prevent immediate duplicate debug lines)
+        self._last_log_line = None
+        # last debug message (separate from general last log) to avoid Text-wrapping artifacts
+        self._last_debug_msg = None
         # resize debounce state
         self._resize_after_id = None
         self._last_window_size = (0, 0)
 
         # build UI
         self.setup_ui()
+
+        # Watch parameter changes to re-validate and re-enable controls when fixed
+        try:
+            # trace_add available in modern tkinter; fall back to trace
+            try:
+                self.cache_size.trace_add('write', lambda *a: self._on_params_changed())
+                self.line_size.trace_add('write', lambda *a: self._on_params_changed())
+                self.associativity.trace_add('write', lambda *a: self._on_params_changed())
+            except Exception:
+                try:
+                    self.cache_size.trace('w', lambda *a: self._on_params_changed())
+                    self.line_size.trace('w', lambda *a: self._on_params_changed())
+                    self.associativity.trace('w', lambda *a: self._on_params_changed())
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Open fullscreen
         try:
@@ -165,9 +211,9 @@ class UserInterface:
         self.cache_size_spinbox.grid(row=row_counter, column=1, sticky=tk.W)
         row_counter += 1
 
-        ttk.Label(self.configuration_container, text="Block size:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
-        self.block_size_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=64, textvariable=self.block_size, width=8)
-        self.block_size_spinbox.grid(row=row_counter, column=1, sticky=tk.W)
+        ttk.Label(self.configuration_container, text="Line size:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
+        self.line_size_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=64, textvariable=self.line_size, width=8)
+        self.line_size_spinbox.grid(row=row_counter, column=1, sticky=tk.W)
         row_counter += 1
 
         # Replacement policy
@@ -184,7 +230,7 @@ class UserInterface:
         row_counter += 1
 
         # Input
-        ttk.Label(self.configuration_container, text="Input (hex or decimal):", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
+        ttk.Label(self.configuration_container, text="Input (addr or action:addr e.g. R:0x10,W:32):", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
         inp_entry = tk.Entry(self.configuration_container, textvariable=self.input, width=entry_width)
         inp_entry.grid(row=row_counter, column=1)
         # update decode panel in real-time as the user types
@@ -202,10 +248,22 @@ class UserInterface:
             pass
         row_counter += 1
 
+        # Manual read/write buttons (consume input tokens one at a time)
+        try:
+            btn_frame = ttk.Frame(self.configuration_container)
+            btn_frame.grid(row=row_counter, column=0, columnspan=2, pady=(6, 6), sticky='w')
+            self.read_next_btn = ttk.Button(btn_frame, text='Read Next', command=self.read_next)
+            self.read_next_btn.grid(row=0, column=0, padx=(0, 6))
+            self.write_next_btn = ttk.Button(btn_frame, text='Write Next', command=self.write_next)
+            self.write_next_btn.grid(row=0, column=1, padx=(0, 6))
+        except Exception:
+            pass
+        row_counter += 1
+
 
         # Scenario selector
         ttk.Label(self.configuration_container, text="Scenario:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
-        scen_menu = ttk.OptionMenu(self.configuration_container, self.scenario_var, 'Matrix Traversal', 'Matrix Traversal', 'Random Access', 'Instruction/Data Parallel', command=self._on_scenario_change)
+        scen_menu = ttk.OptionMenu(self.configuration_container, self.scenario_var, 'Matrix Traversal', 'Matrix Traversal', 'Random Access', command=self._on_scenario_change)
         scen_menu.config(width=option_menu_width)
         scen_menu.grid(row=row_counter, column=1)
         row_counter += 1
@@ -215,13 +273,10 @@ class UserInterface:
         tk.Spinbox(self.configuration_container, from_=1, to=10, textvariable=self.num_passes, width=6).grid(row=row_counter, column=1, sticky=tk.W)
         row_counter += 1
 
-        # Animation speed
-        ttk.Label(self.configuration_container, text="Anim speed (ms):", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
-        tk.Spinbox(self.configuration_container, from_=10, to=2000, increment=10, textvariable=self.anim_speed, width=8).grid(row=row_counter, column=1, sticky=tk.W)
+        # Animation speed control removed; using fixed 1000 ms per step
         row_counter += 1
 
-        # Hex/fast toggles removed
-        row_counter += 1
+        # decode debug verbosity toggle removed from UI
 
         # scenario code area (shows generated sequence/pseudocode)
         ttk.Label(self.configuration_container, text="Scenario code:", font=(self.font_container, 10), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, columnspan=2, sticky='w', pady=(8, 3))
@@ -277,26 +332,22 @@ class UserInterface:
         algorithm_buttons_frame = ttk.Frame(container_right, padding="4")
         algorithm_buttons_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
-        ttk.Label(algorithm_buttons_frame, text="Cache Type:", font=(self.font_container, 11, 'bold'), foreground=self.font_color_1).grid(row=0, column=0, columnspan=4, sticky='w', pady=(0, 4))
-        
-        self.direct_mapped_button = ttk.Button(algorithm_buttons_frame, text="Direct-Mapped", command=self.direct_mapped_algorithm, style='Orange.TButton')
-        self.direct_mapped_button.grid(row=1, column=0, padx=3, pady=2, ipadx=6, ipady=4)
-        self.two_set_associative_button = ttk.Button(algorithm_buttons_frame, text="2-Way Set", command=self.two_set_associative_algorithm, style='Orange.TButton')
-        self.two_set_associative_button.grid(row=1, column=1, padx=3, pady=2, ipadx=6, ipady=4)
-        self.four_set_associative_button = ttk.Button(algorithm_buttons_frame, text="4-Way Set", command=self.four_set_associative_algorithm, style='Orange.TButton')
-        self.four_set_associative_button.grid(row=1, column=2, padx=3, pady=2, ipadx=6, ipady=4)
-        self.fully_associative_button = ttk.Button(algorithm_buttons_frame, text="Fully Associative", command=self.fully_associative_algorithm, style='Orange.TButton')
-        self.fully_associative_button.grid(row=1, column=3, padx=3, pady=2, ipadx=6, ipady=4)
-
-
-        self.fully_associative_button.grid(row=1, column=3, padx=3, pady=2, ipadx=6, ipady=4)
+        ttk.Label(algorithm_buttons_frame, text="Associativity (k):", font=(self.font_container, 11, 'bold'), foreground=self.font_color_1).grid(row=0, column=0, columnspan=3, sticky='w', pady=(0, 4))
+        # Spinbox to choose k (1 = direct mapped, k = number of blocks => fully associative)
+        self.assoc_spinbox = tk.Spinbox(algorithm_buttons_frame, from_=1, to=256, textvariable=self.associativity, width=6)
+        self.assoc_spinbox.grid(row=1, column=0, padx=3, pady=2)
+        self.apply_assoc_btn = ttk.Button(algorithm_buttons_frame, text="Apply", command=self.apply_associativity, style='Orange.TButton')
+        self.apply_assoc_btn.grid(row=1, column=1, padx=3, pady=2, ipadx=6, ipady=4)
+        # Keep backward-compat labels for display
+        self.assoc_info_label = ttk.Label(algorithm_buttons_frame, textvariable=self.cache_type, font=(self.font_container, 10), foreground='#8BC34A')
+        self.assoc_info_label.grid(row=1, column=2, padx=8)
 
         # Address decode panel (shows how address maps to set/tag/way)
         decode_frame = ttk.LabelFrame(container_right, text="Address Decode (Last Access)", padding=6)
         decode_frame.grid(row=1, column=0, sticky='ew', pady=(0, 8))
         self.decode_addr_label = ttk.Label(decode_frame, text="Address: -", font=(self.font_container, 10, 'bold'), foreground='#8BC34A')
         self.decode_addr_label.grid(row=0, column=0, sticky='w', padx=4, pady=2)
-        self.decode_calc_label = ttk.Label(decode_frame, text="block_addr = addr ÷ block_size  |  set = block_addr mod num_sets  |  tag = block_addr ÷ num_sets", font=(self.font_container, 9), foreground='#AAAAAA')
+        self.decode_calc_label = ttk.Label(decode_frame, text="block_addr = addr ÷ line_size  |  set = block_addr mod num_sets  |  tag = block_addr ÷ num_sets", font=(self.font_container, 9), foreground='#AAAAAA')
         self.decode_calc_label.grid(row=1, column=0, sticky='w', padx=4, pady=2)
         # Canvas for graphical binary + segment arrows
         self.decode_result_canvas = tk.Canvas(decode_frame, height=84, bg='#111111', highlightthickness=0)
@@ -347,6 +398,16 @@ class UserInterface:
         # small hit-rate chart
         self.hit_canvas = tk.Canvas(stats_frame, width=180, height=52, bg=self.background_container, highlightthickness=0)
         self.hit_canvas.grid(row=0, column=4, rowspan=2, padx=(16, 0))
+        # export buttons for chart: JSON (data) and PS/PDF (graphic)
+        try:
+            exp_frame = ttk.Frame(stats_frame)
+            exp_frame.grid(row=2, column=4, padx=(16,0), pady=(6,0))
+            self.export_json_btn = ttk.Button(exp_frame, text='Export JSON', command=self.export_chart_json)
+            self.export_json_btn.grid(row=0, column=0, padx=2)
+            self.export_pdf_btn = ttk.Button(exp_frame, text='Export PDF/PS', command=self.export_chart_pdf)
+            self.export_pdf_btn.grid(row=0, column=1, padx=2)
+        except Exception:
+            pass
 
         # initialize scenario display and styles
         self._on_scenario_change(self.scenario_var.get())
@@ -387,14 +448,27 @@ class UserInterface:
         try:
             self.scenario_code.configure(state='normal')
             self.scenario_code.delete('1.0', 'end')
-            if selection == 'Matrix Traversal':
-                self.scenario_code.insert('end', 'for i in range(N):\n    for j in range(N):\n        access A[i][j]')
-            elif selection == 'Random Access':
-                self.scenario_code.insert('end', 'for k in rand():\n    access A[rand_index(k)]')
-            elif selection == 'Instruction/Data Parallel':
-                self.scenario_code.insert('end', 'mix of instruction and data accesses (interleaved)')
+            # Use only predefined scenario descriptions (non-editable sequences)
+            if selection in PREDEFINED_SCENARIOS:
+                # Short human-friendly description
+                if selection == 'Matrix Traversal':
+                    self.scenario_code.insert('end', 'Matrix Traversal (predefined): sequential accesses over a 4x4 matrix\n\n')
+                elif selection == 'Random Access':
+                    self.scenario_code.insert('end', 'Random Access (predefined): fixed pseudo-random pattern\n\n')
+                # (previously had a third predefined scenario; removed)
+                else:
+                    self.scenario_code.insert('end', f'Selected: {selection} (predefined)\n\n')
+                # Show the actual hardcoded sequence (one per line)
+                try:
+                    seq = PREDEFINED_SCENARIOS.get(selection, [])
+                    for (a, w) in seq:
+                        prefix = 'W' if w else 'R'
+                        self.scenario_code.insert('end', f"{prefix}: {hex(a)} ({a})\n")
+                except Exception:
+                    pass
             else:
-                self.scenario_code.insert('end', f'Selected: {selection}')
+                # custom / free input mode
+                self.scenario_code.insert('end', 'Custom input mode: enter addresses into the Input field and use Read Next / Write Next buttons to consume them.')
             self.scenario_code.configure(state='disabled')
         except Exception:
             pass
@@ -433,24 +507,30 @@ class UserInterface:
                     pass
                 return
             token = text.split(',')[0].strip()
+            # allow optional action prefix like R:0x10 or W:32
+            if ':' in token:
+                parts = token.split(':', 1)
+                addr_token = parts[1].strip()
+            else:
+                addr_token = token
             # parse integer (auto-detect 0x prefix). fall back to decimal
             addr = None
             try:
-                addr = int(token, 0)
+                addr = int(addr_token, 0)
             except Exception:
                 try:
-                    addr = int(token, 16)
+                    addr = int(addr_token, 16)
                 except Exception:
                     try:
-                        addr = int(token)
+                        addr = int(addr_token)
                     except Exception:
                         addr = 0
 
-            # fetch block_size and num_sets
+            # fetch line_size and num_sets
             try:
-                block_size = max(1, int(self.block_size.get()))
+                line_size = max(1, int(self.line_size.get()))
             except Exception:
-                block_size = 1
+                line_size = 1
             # try to get core cache values
             num_sets = None
             index_bits = 0
@@ -459,9 +539,9 @@ class UserInterface:
                 core = self.get_core_cache()
                 if core is not None:
                     num_sets = getattr(core, 'num_sets', None)
-                    bs = getattr(core, 'block_size', None)
+                    bs = getattr(core, 'line_size', None)
                     if bs:
-                        block_size = bs
+                        line_size = bs
             except Exception:
                 core = None
 
@@ -469,23 +549,23 @@ class UserInterface:
                 try:
                     raw_cache_size = max(1, int(self.cache_size.get()))
                     associativity = max(1, int(self.associativity.get()))
-                    num_blocks = max(1, raw_cache_size // block_size)
+                    num_blocks = max(1, raw_cache_size // line_size)
                     num_sets = max(1, num_blocks // associativity)
                 except Exception:
                     num_sets = 1
 
             # compute sizes in bits
             try:
-                offset_bits = (block_size - 1).bit_length() if block_size > 1 else 0
+                offset_bits = (line_size - 1).bit_length() if line_size > 1 else 0
                 index_bits = (num_sets - 1).bit_length() if num_sets > 1 else 0
             except Exception:
                 offset_bits = 0
                 index_bits = 0
 
-            block_addr = addr // block_size
+            block_addr = addr // line_size
             set_index = block_addr % num_sets if num_sets > 0 else 0
             tag = block_addr // num_sets if num_sets > 0 else block_addr
-            offset = addr % block_size
+            offset = addr % line_size
 
             # Diagnostic logging for debugging freezes on specific addresses
             try:
@@ -496,7 +576,19 @@ class UserInterface:
                     aw_preview = max(1, index_bits + offset_bits + 1)
                 tb_preview = max(0, aw_preview - (index_bits + offset_bits))
                 bin_preview = bin(addr)[2:].zfill(aw_preview)
-                self._append_log(f"DECODE DEBUG: addr={addr} block_size={block_size} num_sets={num_sets} index_bits={index_bits} offset_bits={offset_bits} aw={aw_preview} tb={tb_preview} bin={bin_preview}")
+                # Only append debug info when enabled and avoid repeating identical lines
+                try:
+                    if getattr(self, 'show_decode_debug', None) and self.show_decode_debug.get():
+                        debug_msg = f"DECODE DEBUG: addr={addr} line_size={line_size} num_sets={num_sets} index_bits={index_bits} offset_bits={offset_bits} aw={aw_preview} tb={tb_preview} bin={bin_preview}"
+                        # compare against the last debug message (separate from last_log_line)
+                        if getattr(self, '_last_debug_msg', None) != debug_msg:
+                            self._append_log(debug_msg)
+                            try:
+                                self._last_debug_msg = debug_msg
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             except Exception:
                 pass
             # build binary representations
@@ -577,7 +669,7 @@ class UserInterface:
                             pass
 
                 # calculation detail line
-                calc = f"block_addr = {block_addr} (addr // block_size={block_size}); set = {set_index} (block_addr % {num_sets}); tag = {tag} (block_addr // {num_sets})"
+                calc = f"block_addr = {block_addr} (addr // line_size={line_size}); set = {set_index} (block_addr % {num_sets}); tag = {tag} (block_addr // {num_sets})"
                 try:
                     canvas.create_text(start_x, y_box + box_h + 34, anchor='w', text=calc, fill='#FFA500', font=(self.font_container, 9))
                 except Exception:
@@ -685,6 +777,10 @@ class UserInterface:
             self.log_text.insert('end', text + '\n')
             self.log_text.see('end')
             self.log_text.configure(state='disabled')
+            try:
+                self._last_log_line = text
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -695,6 +791,11 @@ class UserInterface:
             self.stat_misses.configure(text=str(stats.get('misses', 0)))
             hr = stats.get('hit_rate', 0.0)
             self.stat_hit_rate.configure(text=f"{hr:.3f}")
+            # redraw small hit-rate chart whenever stats update
+            try:
+                self._draw_hit_chart()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -702,30 +803,55 @@ class UserInterface:
         """Parse input addresses, run the simulator (blocking) and update UI with results."""
         # Ensure a cache wrapper exists
         try:
+            # Only allow Run Simulation for predefined scenarios
+            selection = self.scenario_var.get()
+            if selection not in PREDEFINED_SCENARIOS:
+                self._append_log('Run Simulation is only available for predefined scenarios. Use Read Next / Write Next for manual input.')
+                return
             if not hasattr(self, 'cache') or self.cache is None:
-                # default to direct mapped
-                self.direct_mapped_algorithm()
+                # default to current associativity (use generic k-associative wrapper)
+                self.apply_associativity()
 
-            addr_text = self.input.get() or ''
-            tokens = [t.strip() for t in addr_text.split(',') if t.strip()]
-            addresses = []
-            for t in tokens:
-                try:
-                    # try base-0 (auto detect 0x)
-                    val = int(t, 0)
-                except Exception:
-                    try:
-                        val = int(t, 16)
-                    except Exception:
-                        try:
-                            val = int(t)
-                        except Exception:
-                            continue
-                addresses.append(val)
+            # For predefined scenarios, load the fixed sequence
+            seq = PREDEFINED_SCENARIOS.get(selection, [])
+            addresses = [a for (a, w) in seq]
+            writes = [w for (a, w) in seq]
 
             if not addresses:
                 self._append_log('No addresses to simulate')
                 return
+
+            # clamp UI values again and enforce token/address limits
+            try:
+                self._clamp_ui_values()
+            except Exception:
+                pass
+            # enforce token limit to avoid huge sequences
+            if len(addresses) > MAX_INPUT_TOKENS:
+                self._append_log(f"Input truncated to first {MAX_INPUT_TOKENS} addresses (too many tokens)")
+                addresses = addresses[:MAX_INPUT_TOKENS]
+                writes = writes[:MAX_INPUT_TOKENS]
+            # enforce address magnitude wrt address_width
+            try:
+                aw = max(1, int(self.address_width.get()))
+            except Exception:
+                aw = MAX_ADDRESS_WIDTH
+            max_addr = (1 << min(aw, MAX_ADDRESS_WIDTH)) - 1
+            norm_addresses = []
+            norm_writes = []
+            for i, a in enumerate(addresses):
+                if a is None:
+                    continue
+                if a < 0:
+                    self._append_log(f"Negative address skipped: {a}")
+                    continue
+                if a > max_addr:
+                    self._append_log(f"Address {a} exceeds address width, clamped to {max_addr}")
+                    a = max_addr
+                norm_addresses.append(a)
+                norm_writes.append(writes[i] if i < len(writes) else False)
+            addresses = norm_addresses
+            writes = norm_writes
 
             # Use the wrapper's simulator if available
             sim = None
@@ -741,7 +867,8 @@ class UserInterface:
             # Load sequence and run using a non-blocking animation loop
             passes = max(1, int(self.num_passes.get()))
             full_addresses = addresses * passes
-            sim.load_sequence(full_addresses, writes=[False] * len(full_addresses))
+            full_writes = writes * passes
+            sim.load_sequence(full_addresses, writes=full_writes)
             # store running simulator
             self._running_sim = sim
             self._is_running = True
@@ -774,10 +901,10 @@ class UserInterface:
         self._is_paused = True
 
     def step_animation(self):
-        # Single-step: run only the next address (simple approach)
+        # Single-step: run only the next address
         try:
             if not hasattr(self, 'cache') or self.cache is None:
-                self.direct_mapped_algorithm()
+                self.apply_associativity()
             sim = None
             if hasattr(self.cache, 'sim') and getattr(self.cache, 'sim') is not None:
                 sim = self.cache.sim
@@ -792,11 +919,26 @@ class UserInterface:
                 return
             info = sim.step()
             if info:
-                self._append_log(f"Step Addr {info.get('address')}: {'HIT' if info.get('hit') else 'MISS'}")
+                action = 'W' if info.get('is_write') else 'R'
+                self._append_log(f"Step Addr {info.get('address')} ({action}): {'HIT' if info.get('hit') else 'MISS'}")
                 self._update_stats_widgets(info.get('stats', {}))
                 # update cache display to highlight the most recent access
                 try:
                     self.update_cache_display(info)
+                except Exception:
+                    pass
+                # update decode panel to reflect this stepped address as well
+                try:
+                    addr = info.get('address')
+                    if addr is not None:
+                        try:
+                            self._update_decode_from_address(addr)
+                        except Exception:
+                            # fallback to generic decode update
+                            try:
+                                self.update_decode_panel()
+                            except Exception:
+                                pass
                 except Exception:
                     pass
         except Exception:
@@ -826,7 +968,8 @@ class UserInterface:
             # update UI for this step
             hit = info.get('hit', False)
             addr = info.get('address')
-            self._append_log(f"Addr {addr}: {'HIT' if hit else 'MISS'}")
+            action = 'W' if info.get('is_write') else 'R'
+            self._append_log(f"Addr {addr} ({action}): {'HIT' if hit else 'MISS'}")
             self._update_stats_widgets(info.get('stats', {}))
             try:
                 self.update_cache_display(info)
@@ -886,16 +1029,16 @@ class UserInterface:
                 pass
             # determine block size and num_sets (same logic as update_decode_panel)
             try:
-                block_size = max(1, int(self.block_size.get()))
+                line_size = max(1, int(self.line_size.get()))
             except Exception:
-                block_size = 1
+                line_size = 1
             try:
                 core = self.get_core_cache()
                 if core is not None:
                     num_sets = getattr(core, 'num_sets', None)
-                    bs = getattr(core, 'block_size', None)
+                    bs = getattr(core, 'line_size', None)
                     if bs:
-                        block_size = bs
+                        line_size = bs
                 else:
                     num_sets = None
             except Exception:
@@ -905,22 +1048,22 @@ class UserInterface:
                 try:
                     raw_cache_size = max(1, int(self.cache_size.get()))
                     associativity = max(1, int(self.associativity.get()))
-                    num_blocks = max(1, raw_cache_size // block_size)
+                    num_blocks = max(1, raw_cache_size // line_size)
                     num_sets = max(1, num_blocks // associativity)
                 except Exception:
                     num_sets = 1
 
             try:
-                offset_bits = (block_size - 1).bit_length() if block_size > 1 else 0
+                offset_bits = (line_size - 1).bit_length() if line_size > 1 else 0
                 index_bits = (num_sets - 1).bit_length() if num_sets > 1 else 0
             except Exception:
                 offset_bits = 0
                 index_bits = 0
 
-            block_addr = addr // block_size
+            block_addr = addr // line_size
             set_index = block_addr % num_sets if num_sets > 0 else 0
             tag = block_addr // num_sets if num_sets > 0 else block_addr
-            offset = addr % block_size
+            offset = addr % line_size
 
             try:
                 aw = max(1, int(self.address_width.get()))
@@ -980,7 +1123,7 @@ class UserInterface:
                         canvas.create_line(cx, y_box + box_h + 6, cx, y_box + box_h, fill='#FFFFFF', arrow='last')
                     except Exception:
                         pass
-            calc = f"block_addr = {block_addr} (addr // block_size={block_size}); set = {set_index} (block_addr % {num_sets}); tag = {tag} (block_addr // {num_sets})"
+            calc = f"block_addr = {block_addr} (addr // line_size={line_size}); set = {set_index} (block_addr % {num_sets}); tag = {tag} (block_addr // {num_sets})"
             try:
                 canvas.create_text(start_x, y_box + box_h + 34, anchor='w', text=calc, fill='#FFA500', font=(self.font_container, 9))
             except Exception:
@@ -1112,6 +1255,32 @@ class UserInterface:
         except Exception:
             pass
 
+    # --- Export helpers for charts ---
+    def export_chart_json(self):
+        """Wrapper: gather UI stats and call data-layer JSON exporter."""
+        try:
+            stats = {
+                'accesses': int(self.stat_accesses.cget('text')) if hasattr(self, 'stat_accesses') else 0,
+                'hits': int(self.stat_hits.cget('text')) if hasattr(self, 'stat_hits') else 0,
+                'misses': int(self.stat_misses.cget('text')) if hasattr(self, 'stat_misses') else 0,
+                'hit_rate': float(self.stat_hit_rate.cget('text')) if hasattr(self, 'stat_hit_rate') else 0.0,
+            }
+            path = se_export_chart_json(self.hit_rate_history, stats)
+            if path:
+                self._append_log(f'Chart JSON exported to {path}')
+        except Exception as e:
+            self._append_log(f'Failed to export JSON: {e}')
+
+    def export_chart_pdf(self):
+        """Wrapper: export the hit-rate canvas via data-layer exporter."""
+        try:
+            canvas = getattr(self, 'hit_canvas', None)
+            path = se_export_chart_pdf_from_canvas(canvas, self.hit_rate_history)
+            if path:
+                self._append_log(f'Chart exported to {path}')
+        except Exception as e:
+            self._append_log(f'Failed to export chart: {e}')
+
     def direct_mapped_algorithm(self):
         self.associativity.set(1)
         self.cache_type.set('Direct-Mapped')
@@ -1211,9 +1380,428 @@ class UserInterface:
         except Exception:
             pass
 
-# Due to file size constraints in this patch, the remainder of the UserInterface
-# methods were omitted here but are unchanged from the original implementation.
-# In the repository the full methods are present so the UI behaves identically.
+    def apply_associativity(self):
+        """Apply the user-selected associativity (k) and build a k-associative cache.
+
+        This uses the generic K_associative_cache wrapper so the backend honors
+        any k in the range [1, num_blocks].
+        """
+        # clamp UI fields to reasonable limits before building cache
+        try:
+            self._clamp_ui_values()
+        except Exception:
+            pass
+        try:
+            k = max(1, int(self.associativity.get()))
+        except Exception:
+            k = 1
+        # Validate UI params and warn if something looks off
+        try:
+            ok = self.validate_ui_params()
+            if not ok:
+                self._append_log('Invalid parameters - fix inputs before applying')
+                return
+        except Exception:
+            pass
+        # Build K-associative wrapper
+        try:
+            self.cache_type.set(f"{k}-Way Set" if k != 1 else 'Direct-Mapped')
+            wrapper = K_associative_cache(self, associativity=k)
+            wrapper.build()
+            self.cache_wrapper = wrapper
+            # also keep self.cache for compatibility
+            self.cache = wrapper
+            # create UI frame labels according to number of blocks
+            try:
+                nb = getattr(wrapper.cache, 'num_blocks', None) or max(1, int(self.cache_size.get()))
+            except Exception:
+                nb = max(1, int(self.cache_size.get()))
+            self.create_frame_labels(nb)
+            try:
+                self.update_replacement_controls()
+            except Exception:
+                pass
+            try:
+                self.update_rep_set_choices()
+                self.update_replacement_panel()
+            except Exception:
+                pass
+            # reset manual token state when a new cache is built
+            try:
+                self._manual_tokens = []
+                self._manual_index = 0
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self._append_log(f"Error applying associativity {k}: {e}")
+            except Exception:
+                pass
+
+    def _clamp_ui_values(self):
+        """Clamp and normalize UI inputs to reasonable bounds.
+
+        This prevents users from creating extremely large caches or entering
+        addresses that won't fit the configured address width. We log when
+        values are clamped so users see what happened.
+        """
+        try:
+            # cache size
+            try:
+                cs = int(self.cache_size.get())
+            except Exception:
+                cs = 1
+            if cs < 1:
+                cs = 1
+            if cs > MAX_CACHE_SIZE:
+                self._append_log(f"Cache size {cs} too large, clamped to {MAX_CACHE_SIZE}")
+                cs = MAX_CACHE_SIZE
+            self.cache_size.set(cs)
+            # line/block size
+            try:
+                bs = int(self.line_size.get())
+            except Exception:
+                bs = 1
+            if bs < 1:
+                bs = 1
+            if bs > MAX_LINE_SIZE:
+                self._append_log(f"Line size {bs} too large, clamped to {MAX_LINE_SIZE}")
+                bs = MAX_LINE_SIZE
+            self.line_size.set(bs)
+            # address width
+            try:
+                aw = int(self.address_width.get())
+            except Exception:
+                aw = 1
+            if aw < 1:
+                aw = 1
+            if aw > MAX_ADDRESS_WIDTH:
+                self._append_log(f"Address width {aw} too large, clamped to {MAX_ADDRESS_WIDTH}")
+                aw = MAX_ADDRESS_WIDTH
+            self.address_width.set(aw)
+            # anim speed clamp
+            try:
+                s = int(self.anim_speed.get())
+            except Exception:
+                s = MIN_ANIM_SPEED
+            if s < MIN_ANIM_SPEED:
+                s = MIN_ANIM_SPEED
+            if s > MAX_ANIM_SPEED:
+                s = MAX_ANIM_SPEED
+            self.anim_speed.set(s)
+            # num_passes clamp (keep small)
+            try:
+                p = int(self.num_passes.get())
+            except Exception:
+                p = 1
+            if p < 1:
+                p = 1
+            if p > 10:
+                self._append_log('Passes limited to 10')
+                p = 10
+            self.num_passes.set(p)
+            # associativity cannot exceed number of blocks (clamped later in wrapper)
+            try:
+                assoc = int(self.associativity.get())
+            except Exception:
+                assoc = 1
+            if assoc < 1:
+                assoc = 1
+            # basic upper bound to prevent silly values
+            if assoc > max(1, cs):
+                self._append_log(f"Associativity {assoc} too large, clamped to {max(1, cs)}")
+                assoc = max(1, cs)
+            self.associativity.set(assoc)
+        except Exception:
+            pass
+
+    def _set_controls_enabled(self, enabled: bool):
+        """Enable or disable interactive controls when parameters are invalid.
+
+        This method is defensive: if a control doesn't exist yet we ignore it.
+        """
+        state = 'normal' if enabled else 'disabled'
+        try:
+            if hasattr(self, 'read_next_btn') and self.read_next_btn is not None:
+                try:
+                    self.read_next_btn.configure(state=state)
+                except Exception:
+                    pass
+            if hasattr(self, 'write_next_btn') and self.write_next_btn is not None:
+                try:
+                    self.write_next_btn.configure(state=state)
+                except Exception:
+                    pass
+            if hasattr(self, 'run_button') and self.run_button is not None:
+                try:
+                    self.run_button.configure(state=state)
+                except Exception:
+                    pass
+            if hasattr(self, 'apply_assoc_btn') and self.apply_assoc_btn is not None:
+                try:
+                    self.apply_assoc_btn.configure(state=state)
+                except Exception:
+                    pass
+            # playback controls
+            if hasattr(self, 'play_btn') and self.play_btn is not None:
+                try:
+                    self.play_btn.configure(state=state)
+                except Exception:
+                    pass
+            if hasattr(self, 'pause_btn') and self.pause_btn is not None:
+                try:
+                    self.pause_btn.configure(state=state)
+                except Exception:
+                    pass
+            if hasattr(self, 'step_btn') and self.step_btn is not None:
+                try:
+                    self.step_btn.configure(state=state)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_params_changed(self):
+        """Called when cache_size/line_size/associativity change to re-validate params."""
+        try:
+            ok = self.validate_ui_params()
+            # validate_ui_params will enable controls if ok; if not, keep them disabled
+            return ok
+        except Exception:
+            return False
+
+    def validate_ui_params(self) -> bool:
+        """Validate UI parameter combinations and alert the user for problematic inputs.
+
+        Returns True if parameters are acceptable (warnings may still have been shown).
+        """
+        try:
+            cs = int(self.cache_size.get())
+        except Exception:
+            cs = 1
+        try:
+            ls = int(self.line_size.get())
+        except Exception:
+            ls = 1
+        try:
+            assoc = int(self.associativity.get())
+        except Exception:
+            assoc = 1
+
+        # basic invalid cases
+        if ls <= 0:
+            messagebox.showwarning('Invalid parameter', 'Line size must be >= 1')
+            try:
+                self._set_controls_enabled(False)
+            except Exception:
+                pass
+            return False
+        if cs <= 0:
+            messagebox.showwarning('Invalid parameter', 'Cache size must be >= 1')
+            try:
+                self._set_controls_enabled(False)
+            except Exception:
+                pass
+            return False
+
+        # cache size must be exact multiple of line size for simplicity
+        if cs % ls != 0:
+            msg = (
+                f'Cache size ({cs}) is not an exact multiple of line size ({ls}).\n'
+                'Please choose values where cache_size is a multiple of line_size.'
+            )
+            try:
+                messagebox.showwarning('Cache size / Line size mismatch', msg)
+            except Exception:
+                pass
+            self._append_log(msg)
+            try:
+                self._set_controls_enabled(False)
+            except Exception:
+                pass
+            return False
+
+        # compute number of blocks and warn if associativity > blocks
+        num_blocks = max(1, cs // ls)
+        if assoc > num_blocks:
+            msg = f'Associativity ({assoc}) exceeds number of blocks ({num_blocks}). Please reduce associativity or increase cache/line size.'
+            try:
+                messagebox.showwarning('Associativity too large', msg)
+            except Exception:
+                pass
+            self._append_log(msg)
+            try:
+                self._set_controls_enabled(False)
+            except Exception:
+                pass
+            return False
+
+        # ensure associativity divides number of blocks (otherwise mapping is ambiguous)
+        if num_blocks % assoc != 0:
+            msg = f'Associativity ({assoc}) does not divide the number of blocks ({num_blocks}). Please choose an associativity that evenly divides number of blocks.'
+            try:
+                messagebox.showwarning('Associativity mismatch', msg)
+            except Exception:
+                pass
+            self._append_log(msg)
+            try:
+                self._set_controls_enabled(False)
+            except Exception:
+                pass
+            return False
+
+        # all good -> enable controls
+        try:
+            self._set_controls_enabled(True)
+        except Exception:
+            pass
+        return True
+
+    # --- Manual input consumption helpers ---
+    def _prepare_manual_tokens(self):
+        """Parse the Input field into a list of integer addresses for manual mode.
+
+        This ignores any R:/W: prefixes — the Read/Write buttons decide the action.
+        """
+        try:
+            text = (self.input.get() or '').strip()
+            if not text:
+                self._manual_tokens = []
+                self._manual_index = 0
+                return
+            # split on commas and whitespace
+            raw = [t.strip() for part in text.split(',') for t in part.split() if t.strip()]
+            tokens = []
+            # keep the original raw tokens (for updating the input field as we consume)
+            self._manual_raw_tokens = list(raw)
+            for t in raw:
+                # ignore optional action prefix for manual mode
+                if ':' in t:
+                    parts = t.split(':', 1)
+                    tval = parts[1].strip()
+                else:
+                    tval = t
+                try:
+                    val = int(tval, 0)
+                except Exception:
+                    try:
+                        val = int(tval, 16)
+                    except Exception:
+                        try:
+                            val = int(tval)
+                        except Exception:
+                            self._append_log(f"Skipped invalid token in manual input: {t}")
+                            continue
+                tokens.append(val)
+            # enforce token limit
+            if len(tokens) > MAX_INPUT_TOKENS:
+                self._append_log(f"Manual input truncated to first {MAX_INPUT_TOKENS} tokens")
+                tokens = tokens[:MAX_INPUT_TOKENS]
+            # clamp addresses by address_width
+            try:
+                aw = max(1, int(self.address_width.get()))
+            except Exception:
+                aw = MAX_ADDRESS_WIDTH
+            max_addr = (1 << min(aw, MAX_ADDRESS_WIDTH)) - 1
+            norm = []
+            for a in tokens:
+                if a < 0:
+                    self._append_log(f"Negative address skipped: {a}")
+                    continue
+                if a > max_addr:
+                    self._append_log(f"Address {a} exceeds address width, clamped to {max_addr}")
+                    a = max_addr
+                norm.append(a)
+            self._manual_tokens = norm
+            self._manual_index = 0
+        except Exception:
+            self._manual_tokens = []
+            self._manual_index = 0
+            self._manual_raw_tokens = []
+
+    def _consume_manual_token(self, is_write: bool):
+        """Consume next manual token and perform a single access (read or write).
+
+        Returns the info dict from the simulator step or None.
+        """
+        try:
+            if not hasattr(self, 'cache') or self.cache is None:
+                self.apply_associativity()
+            if not hasattr(self, '_manual_tokens') or not self._manual_tokens:
+                self._prepare_manual_tokens()
+            if not getattr(self, '_manual_tokens', None):
+                self._append_log('No manual input tokens available')
+                return None
+            if self._manual_index >= len(self._manual_tokens):
+                self._append_log('No more manual tokens')
+                return None
+            addr = self._manual_tokens[self._manual_index]
+            self._manual_index += 1
+
+            # Use wrapper's simulator for consistency
+            sim = None
+            if hasattr(self.cache, 'sim') and getattr(self.cache, 'sim') is not None:
+                sim = self.cache.sim
+            elif hasattr(self.cache_wrapper, 'sim') and getattr(self.cache_wrapper, 'sim') is not None:
+                sim = self.cache_wrapper.sim
+            if sim is None:
+                self._append_log('No simulator available for manual access')
+                return None
+
+            sim.load_sequence([addr], writes=[is_write])
+            info = sim.step()
+            if info:
+                action = 'W' if info.get('is_write') else 'R'
+                self._append_log(f"Manual {action} Addr {info.get('address')}: {'HIT' if info.get('hit') else 'MISS'}")
+                self._update_stats_widgets(info.get('stats', {}))
+                try:
+                    self.update_cache_display(info)
+                except Exception:
+                    pass
+                # update hit-rate history and redraw small chart (same logic as animation step)
+                try:
+                    hr = info.get('stats', {}).get('hit_rate', None)
+                    if hr is None:
+                        s = info.get('stats', {})
+                        accesses = s.get('accesses', 0)
+                        hits = s.get('hits', 0)
+                        hr = (hits / accesses) if accesses else 0.0
+                    self.hit_rate_history.append(hr)
+                    if len(self.hit_rate_history) > 200:
+                        self.hit_rate_history = self.hit_rate_history[-200:]
+                    try:
+                        self._draw_hit_chart()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            # update the input box to remove the consumed raw token
+            try:
+                remaining = self._manual_raw_tokens[self._manual_index:]
+                self.input.set(','.join(remaining))
+                # refresh decode preview
+                try:
+                    self.update_decode_panel()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            return info
+        except Exception as e:
+            self._append_log(f"Error performing manual access: {e}")
+            return None
+
+    def read_next(self):
+        try:
+            self._consume_manual_token(is_write=False)
+        except Exception:
+            pass
+
+    def write_next(self):
+        try:
+            self._consume_manual_token(is_write=True)
+        except Exception:
+            pass
 
 def run_ui():
     ui = UserInterface()
