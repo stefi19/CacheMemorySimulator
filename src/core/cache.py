@@ -244,3 +244,26 @@ class Cache:
             except Exception:
                 pass
 
+    def set_replacement(self, replacement: str):
+        """Change the replacement policy for all sets at runtime.
+
+        This will recreate the per-set replacement policy objects to the
+        requested type. Existing policy state is discarded.
+        """
+        try:
+            self._replacement_name = replacement
+            new_objs: List[object] = []
+            for _ in range(self.num_sets):
+                if replacement == "LRU":
+                    new_objs.append(LRUReplacement(self.associativity))
+                elif replacement == "FIFO":
+                    new_objs.append(FIFOReplacement(self.associativity))
+                elif replacement == "Random":
+                    new_objs.append(RandomReplacement(self.associativity))
+                else:
+                    new_objs.append(LRUReplacement(self.associativity))
+            self.replacement_policy_objs = new_objs
+        except Exception:
+            # keep existing policies on failure
+            pass
+

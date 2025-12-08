@@ -520,7 +520,33 @@ class UserInterface:
         core = self.get_core_cache()
         if core is not None:
             try:
-                core._replacement_name = name
+                # update core replacement policy objects in-place so the
+                # running cache/simulator adopts the new policy immediately
+                if hasattr(core, 'set_replacement'):
+                    try:
+                        core.set_replacement(name)
+                    except Exception:
+                        try:
+                            core._replacement_name = name
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        core._replacement_name = name
+                    except Exception:
+                        pass
+                # Log the active replacement types per-set for debugging so the
+                # user can confirm the UI change had effect (appears in Eviction log).
+                try:
+                    types = [type(p).__name__ for p in getattr(core, 'replacement_policy_objs', [])]
+                    self._append_log(f'Replacement changed to {name}: per-set types = {types}')
+                except Exception:
+                    pass
+                # refresh cache display so any visual indicators update
+                try:
+                    self.update_cache_display({})
+                except Exception:
+                    pass
             except Exception:
                 pass
         # Update the small replacement-policy label in the UI
