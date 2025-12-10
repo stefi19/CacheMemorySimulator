@@ -1,20 +1,12 @@
-"""Core cache implementation with short, informal English comments.
+"""Core cache implementation
 
-This file provides a simple set-associative cache model used by the
-simulator and UI. Comments are written like a student explaining the
-main ideas (short and informal), and the code is defensive against
-obvious bad inputs (like zero associativity or zero block size).
-
-Behavior contract (short):
+This file provides a simple set-associative cache model used by the simulator and UI.
+Behavior:
 - Cache is composed of sets; each set has `associativity` ways.
-    - Mapping: block_addr = address // line_size
+  block_addr = address // line_size
   set_index = block_addr % num_sets
   tag = block_addr // num_sets
 - Access returns (hit:bool, set_index:int, way_index:Optional[int], evicted:Optional[CacheBlock], mem_read:bool, mem_write:bool)
-
-The replacement policy objects are expected to implement methods used by
-the UI/core: `.access(way_index)`, `.evict()` -> Optional[int], `.reset()`.
-If a policy method is missing, we catch exceptions and fallback safely.
 """
 
 from dataclasses import dataclass
@@ -27,13 +19,13 @@ from src.core.replacement_policies import LRUReplacement, FIFOReplacement, Rando
 
 @dataclass
 class CacheBlock:
-    """Tiny container for a cache line (way).
+    """container for a cache line (way).
 
     Fields:
     - tag: the tag stored in the line
     - valid: whether the line currently holds useful data
     - dirty: whether the line was written (for write-back)
-    - last_access_time / load_time: helpers used by policies like LRU/FIFO
+    - last_access_time / load_time: helpers used by policies LRU/FIFO
     """
 
     tag: Optional[int] = None
@@ -72,14 +64,11 @@ class Cache:
                     break
 
         self.num_blocks = num_blocks
-        # rename: internal field now called line_size (formerly block_size)
-        self.line_size = line_size if line_size > 0 else 1  # avoid /0
+        self.line_size = line_size if line_size > 0 else 1
         self.associativity = associativity
         self.num_sets = max(1, num_blocks // associativity)
         self.write_policy = write_policy
         self.write_miss_policy = write_miss_policy
-
-        # keep the name (for debugging/tests) and instantiate one policy per set
         self._replacement_name = replacement
         self.replacement_policy_objs: List[object] = []
         for _ in range(self.num_sets):
@@ -90,7 +79,7 @@ class Cache:
             elif replacement == "Random":
                 self.replacement_policy_objs.append(RandomReplacement(self.associativity))
             else:
-                # unknown name -> fallback to LRU
+                # fallback to LRU
                 self.replacement_policy_objs.append(LRUReplacement(self.associativity))
 
         # allocate the sets matrix: num_sets x associativity
@@ -99,15 +88,11 @@ class Cache:
         ]
 
     def _decode(self, address: int):
-        """Decode address into (set_index, tag).
+        """Decode address into (set_index, tag)."""
 
-    Defensive: use line_size >=1 and num_sets>=1 so we never divide by zero.
-        """
-
-        # use line_size internally
         bs = self.line_size if self.line_size > 0 else 1
         block_addr = address // bs
-        # num_sets should already be >=1, but be defensive
+        # num_sets should already be >=1, but be sure
         if self.num_sets <= 0:
             return 0, block_addr
         set_index = block_addr % self.num_sets
@@ -133,6 +118,7 @@ class Cache:
         cache_set = self.sets[set_index]
 
         # search for hit
+        # wi = way-index
         for wi, block in enumerate(cache_set):
             if block.valid and block.tag == tag:
                 # hit: update timestamps and notify policy
@@ -156,11 +142,11 @@ class Cache:
                 return True, set_index, wi, None, mem_read, mem_write
 
         # miss handling
-        if is_write and write_miss_policy in ("no-write-allocate", "no-allocate", "write-no-allocate"):
+        if is_write and write_miss_policy in ("write-no-allocate"):
             # don't allocate on write miss: write directly to memory
             return False, set_index, None, None, False, True
 
-        # try to find a free way (fast path)
+        # try to find a free way
         for wi, block in enumerate(cache_set):
             if not block.valid:
                 # fill this way

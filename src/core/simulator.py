@@ -1,8 +1,5 @@
-"""CacheSimulator (Core package) - coordinates cache accesses and statistics.
-
-Student-style: this is the little engine that feeds addresses into the
-core Cache and updates simple stats. It's intentionally straightforward
-so students can follow how accesses map to hits/misses.
+"""CacheSimulator coordinates cache accesses and statistics.
+Feeds addresses into the core Cache and updates simple stats. 
 """
 from typing import List, Tuple, Optional, Callable
 from .cache import Cache, CacheBlock
@@ -14,9 +11,6 @@ class CacheSimulator:
     def __init__(self, cache: Cache, stats: Optional[Statistics] = None, ram: Optional[RAM] = None):
         self.cache = cache
         self.stats = stats or Statistics()
-        # optional RAM backing store — if provided, cache misses/evictions
-        # that indicate memory reads/writes will be forwarded to this RAM
-        # object so the simulator models a backing store.
         self.ram = ram
         self.sequence: List[Tuple[int, bool]] = []
         self.index = 0
@@ -45,7 +39,7 @@ class CacheSimulator:
         address, is_write = self.sequence[self.index]
         self.index += 1
 
-        # pass through write-miss policy from cache object if available
+        # pass through write-miss policy from cache object
         write_miss_policy = getattr(self.cache, 'write_miss_policy', 'write-allocate')
         hit, set_index, way_index, evicted, mem_read, mem_write = self.cache.access(address, is_write=is_write, write_miss_policy=write_miss_policy)
         self.stats.record_access(hit)
@@ -54,7 +48,7 @@ class CacheSimulator:
             self.stats.memory_reads += 1
             try:
                 if self.ram is not None:
-                    # perform a backing read (value unused here)
+                    # perform a backing read
                     self.ram.read(address)
             except Exception:
                 pass
@@ -62,7 +56,7 @@ class CacheSimulator:
             self.stats.memory_writes += 1
             try:
                 if self.ram is not None:
-                    # perform a backing write (store a placeholder value)
+                    # perform a backing write 
                     self.ram.write(address, 1)
             except Exception:
                 pass

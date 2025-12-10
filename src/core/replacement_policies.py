@@ -1,22 +1,19 @@
-"""Replacement policy implementations adapted for the CacheMemorySimulator.
+"""Replacement policy implementations.
 
 This module provides three policies with a small, consistent API so the
 rest of the simulator can call them interchangeably:
-
 - LRUReplacement(capacity)
 - FIFOReplacement(capacity)
 - RandomReplacement(capacity)
 
-API (methods):
+Methods:
 - access(key): notify policy that `key` was accessed (may update state)
 - evict(): choose and remove a victim according to policy, return key
-- peek(): return current keys in the policy's internal order (for UI/debug)
+- peek(): return current keys in the policy's internal order (for UI)
 - reset(): clear policy state
 
 These implementations avoid printing in the core methods; UI can inspect
 state and log messages if required.
-# Student-style note: I kept these policies small and simple so the UI can
-# call them without dealing with internals. They're easy to read and tweak.
 """
 
 import random
@@ -41,7 +38,7 @@ class LRUReplacement:
             # mark as most recently used
             self._od.move_to_end(key)
         else:
-            # insert as MRU
+            # insert
             self._od[key] = True
             # evict if over capacity
             if len(self._od) > self.capacity:

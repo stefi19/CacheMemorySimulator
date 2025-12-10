@@ -250,7 +250,8 @@ class UserInterface:
 
         # RAM size
         ttk.Label(self.configuration_container, text="RAM size (bytes):", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
-        self.ram_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=1048576, textvariable=self.ram_size, width=10)
+        # limit RAM size input to a maximum of 64 bytes in the UI per request
+        self.ram_spinbox = tk.Spinbox(self.configuration_container, from_=1, to=64, textvariable=self.ram_size, width=10)
         self.ram_spinbox.grid(row=row_counter, column=1, sticky=tk.W)
         row_counter += 1
 
@@ -268,7 +269,7 @@ class UserInterface:
         row_counter += 1
 
         # Input
-        ttk.Label(self.configuration_container, text="Input (addr or action:addr e.g. R:0x10,W:32):", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
+        ttk.Label(self.configuration_container, text="Input:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
         inp_entry = tk.Entry(self.configuration_container, textvariable=self.input, width=entry_width)
         inp_entry.grid(row=row_counter, column=1)
         # keep a reference to the Entry so we can rebind events when needed
@@ -489,7 +490,7 @@ class UserInterface:
             exp_frame.grid(row=2, column=4, padx=(16,0), pady=(6,0))
             self.export_json_btn = ttk.Button(exp_frame, text='Export JSON', command=self.export_chart_json)
             self.export_json_btn.grid(row=0, column=0, padx=2)
-            self.export_pdf_btn = ttk.Button(exp_frame, text='Export PDF/PS', command=self.export_chart_pdf)
+            self.export_pdf_btn = ttk.Button(exp_frame, text='Export PDF', command=self.export_chart_pdf)
             self.export_pdf_btn.grid(row=0, column=1, padx=2)
         except Exception:
             pass
@@ -619,12 +620,8 @@ class UserInterface:
                     pass
                 return
             token = text.split(',')[0].strip()
-            # allow optional action prefix like R:0x10 or W:32
-            if ':' in token:
-                parts = token.split(':', 1)
-                addr_token = parts[1].strip()
-            else:
-                addr_token = token
+            # Expect a plain address token (decimal) or hex with 0x prefix
+            addr_token = token
             # parse integer (auto-detect 0x prefix). fall back to decimal
             addr = None
             try:
@@ -2138,7 +2135,10 @@ class UserInterface:
     def _ensure_ram_object(self):
         """Create or update the RAM backing-store object from current UI fields."""
         try:
+            # Clamp RAM size to UI maximum (64) to prevent large drawings / bad input
             size = max(1, int(self.ram_size.get()))
+            if size > 64:
+                size = 64
         except Exception:
             size = 1024
         try:
@@ -2675,23 +2675,18 @@ class UserInterface:
             # keep the original raw tokens (for updating the input field as we consume)
             self._manual_raw_tokens = list(raw)
             for t in raw:
-                # ignore optional action prefix for manual mode
-                if ':' in t:
-                    parts = t.split(':', 1)
-                    tval = parts[1].strip()
-                else:
-                    tval = t
+                # Expect plain addresses (decimal) or hex with 0x prefix.
+                tval = t
                 try:
+                    # int(..., 0) accepts 0x prefixed hex or decimal
                     val = int(tval, 0)
                 except Exception:
                     try:
-                        val = int(tval, 16)
+                        # final fallback: try decimal
+                        val = int(tval)
                     except Exception:
-                        try:
-                            val = int(tval)
-                        except Exception:
-                            self._append_log(f"Skipped invalid token in manual input: {t}")
-                            continue
+                        self._append_log(f"Skipped invalid token in manual input: {t}")
+                        continue
                 tokens.append(val)
             # enforce token limit
             if len(tokens) > MAX_INPUT_TOKENS:
@@ -2766,11 +2761,17 @@ class UserInterface:
                 except Exception:
                     pass
                 # record RAM access (for highlighting) and refresh RAM display after manual access
+                # Only highlight RAM when the simulator actually performed a memory
+                # read or write (mem_read/mem_write). This prevents always-highlighting
+                # on hits that are served entirely from cache.
                 try:
-                    try:
-                        self._note_ram_access(info.get('address'), info.get('is_write'))
-                    except Exception:
-                        pass
+                    mem_read = bool(info.get('mem_read')) if info.get('mem_read') is not None else False
+                    mem_write = bool(info.get('mem_write')) if info.get('mem_write') is not None else False
+                    if mem_read or mem_write:
+                        try:
+                            self._note_ram_access(info.get('address'), info.get('is_write'))
+                        except Exception:
+                            pass
                     try:
                         self.update_ram_display()
                     except Exception:

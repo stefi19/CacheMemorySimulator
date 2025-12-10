@@ -1,8 +1,7 @@
-"""High-level Simulation wrapper used by the UI (moved into src.simulation).
+"""Simulation wrapper used by the UI
 
-Student-style: this is a tiny helper that converts UI inputs into a
-sequence of addresses and forwards them to the chosen cache wrapper.
-I kept the logic explicit so it's easy to follow.
+Converts UI inputs into a sequence of addresses and forwards 
+them to the cache wrapper.
 """
 from src.wrappers.k_associative_cache import K_associative_cache
 
@@ -13,15 +12,10 @@ class Simulation:
         self.cache_wrapper = None
 
     def _create_cache_from_ui(self):
-        # Only create a cache wrapper if one does not already exist. This
-        # preserves replacement-policy state and other cache internals across
-        # multiple calls to run_simulation. If the UI wants to rebuild the
-        # cache (e.g. after Apply/Reset) it should clear or replace
-        # `self.cache_wrapper` explicitly.
+        # Only create a cache wrapper if one does not already exist.
         if getattr(self, 'cache_wrapper', None) is not None:
             return
         assoc = int(self.ui.associativity.get())
-        # Use the generic K-associative wrapper for all associativities.
         wrapper = K_associative_cache(self.ui, associativity=assoc)
         wrapper.build()
         self.cache_wrapper = wrapper
@@ -57,11 +51,11 @@ class Simulation:
                 # fallback: return original
                 return s
 
-    # Run the sequence for num_passes times (warm-up then repeated runs)
+    # Run the sequence for num_passes times
         for p in range(num_passes):
             for idx, it in enumerate(items):
                 try:
-                    # integer items -> treat as hex value
+                    # integer items treat as hex value
                     if isinstance(it, int):
                         info = self.cache_wrapper.load_instruction(None, format(it, 'x'))
                     else:
@@ -96,7 +90,6 @@ class Simulation:
     def _generate_sequence_for_scenario(self, name: str):
         # Produce a list of hex strings (or integers) for predefined scenarios
         if name == 'Matrix Traversal':
-            # use a larger matrix (10x10 => ~100 addresses) per user preference
             N = 10
             seq = []
             for i in range(N):
@@ -105,11 +98,9 @@ class Simulation:
             return seq
         elif name == 'Random Access':
             import random
-            # fewer random accesses to ensure the scenario runs quickly
             return [format(random.randint(0, 255), 'x') for _ in range(16)]
         else:
-            # Fallback generator: interleave two small sequences (instructions and data)
-            # use smaller lengths so fallback scenarios are short
+            # Fallback
             instr = list(range(0, 32))
             data = [100 + (i % 8) for i in range(32)]
             seq = []

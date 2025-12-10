@@ -1,12 +1,11 @@
-"""Simple RAM model used as backing store for the cache simulator.
+"""Simple RAM model.
 
-This is a lightweight, byte-addressable RAM abstraction. It's not a
-full memory emulator — it stores values in a dict keyed by address and
-supports simple read/write operations. The UI exposes a configurable
+This is a byte-addressable RAM abstraction.
+Supports simple read/write operations. The UI exposes a configurable
 `ram_size` (in bytes) and the RAM is passed to the core simulator so
 cache misses can read/write the backing memory.
 
-The contract is intentionally small:
+Parameters:
 - RAM(size_bytes, line_size)
 - read(address) -> returns stored value or 0
 - write(address, value=0) -> stores value at address
@@ -29,31 +28,25 @@ class RAM:
         self.storage = {}
 
     def _clamp_addr(self, address: int) -> int:
-        try:
-            if address < 0:
-                return 0
-            if address >= self.size:
-                # clamp to last valid address
-                return self.size - 1
-            return address
-        except Exception:
-            return 0
+        # Validate address and raise on out-of-bounds. The previous
+        # implementation silently clamped addresses which hid bugs.
+        if not isinstance(address, int):
+            raise TypeError(f"address must be int, got {type(address).__name__}")
+        if address < 0 or address >= self.size:
+            raise IndexError(f"address {address} out of range [0, {self.size - 1}]")
+        return address
 
     def read(self, address: int) -> int:
         """Read a byte/word at `address`. Returns stored value or 0 if not present."""
-        try:
-            a = self._clamp_addr(int(address))
-            return self.storage.get(a, 0)
-        except Exception:
-            return 0
+        a = int(address)
+        a = self._clamp_addr(a)
+        return self.storage.get(a, 0)
 
     def write(self, address: int, value: Optional[int] = 0):
         """Write a value to `address`. If out of bounds, address is clamped."""
-        try:
-            a = self._clamp_addr(int(address))
-            self.storage[a] = 0 if value is None else int(value)
-        except Exception:
-            pass
+        a = int(address)
+        a = self._clamp_addr(a)
+        self.storage[a] = 0 if value is None else int(value)
 
     def reset(self):
         try:
