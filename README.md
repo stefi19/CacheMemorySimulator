@@ -189,6 +189,7 @@ Open a terminal and run:
 
 ```bash
 python run.py
+```
 # Cache Memory Simulator
 
 A configurable, educational CPU cache + RAM simulator written in Python.
@@ -336,32 +337,3 @@ exclude the UI and exercise only core behavior.
 - Random replacement is non-deterministic — tests assert evicted-tag
 	membership rather than an exact value.
 
-## CI suggestion (GitHub Actions)
-
-Create `.github/workflows/python-tests.yml` with a matrix for Python
-versions (3.10+). Steps:
-
-- checkout
-- setup-python
-- install pytest
-- run `pytest -q`
-
-Optionally add type checks (`mypy`) and linting (`flake8`).
-
-## To-dos / future improvements
-
-- Decide on full-line versus base-address-only writebacks and adjust
-	tests if changing semantics.
-- Add property-based tests (Hypothesis) for stronger invariants.
-- Add CI and pre-commit hooks.
-
-## Contact / contribution
-
-Open issues or PRs for behavior changes (e.g., full-line writeback),
-improvements to the UI, expanded test matrices, or CI integrations.
-
----
-
-_Generated and maintained alongside the test-suite and code. For any
-discrepancy between tests and this README, the tests are the source of
-truth._
