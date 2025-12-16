@@ -1,8 +1,4 @@
-"""User interface moved into the simulation package.
-
-This file is the same UI implementation previously at `src/user_interface.py`.
-It was relocated here to keep the top-level `src/` directory focused on
-core packages. The run entrypoint (`run.py`) will import the UI from
+"""The run entrypoint (`run.py`) will import the UI from
 `src.simulation.user_interface`.
 """
 
@@ -20,7 +16,7 @@ import tempfile
 import time
 from tkinter import filedialog
 
-# This UI is a big single class that wires the widgets to the cache wrappers.
+# wires the widgets to the cache wrappers.
 
 # Reasonable UI limits so users don't enter absurd numbers
 MAX_CACHE_SIZE = 64
@@ -61,7 +57,7 @@ class UserInterface:
         self.address_width = tk.IntVar(value=6)
         self.line_size = tk.IntVar(value=2)
         self.associativity = tk.IntVar(value=1)
-        # show verbose decode debug messages in the eviction/log pane (removed checkbox)
+        # show verbose decode debug messages in the eviction/log pane
         # small status string showing applied/clamped values after Apply
         self.effective_info = tk.StringVar(value='')
         self.write_hit_policy = tk.StringVar(value="write-back")
@@ -80,8 +76,6 @@ class UserInterface:
         self.num_passes = tk.IntVar(value=3)
         # Fixed animation speed: 1000 ms (1 second) — user control removed
         self.anim_speed = tk.IntVar(value=1000)  # milliseconds per step (fixed)
-        # removed display_hex and fast_mode checkboxes per user request
-        # (these UI toggles were removed to simplify the interface)
         self.anim_cap = tk.IntVar(value=256)
         # RAM configuration (default to 64 bytes / lines window)
         self.ram_size = tk.IntVar(value=64)
@@ -90,10 +84,8 @@ class UserInterface:
         self.dir = 0
         self.binary_value = 0
         self.text_boxes = []
-
         self.cache_wrapper = None
         self.frame_labels = []
-
         # animation/playback state
         self._is_running = False
         self._is_paused = False
@@ -133,11 +125,15 @@ class UserInterface:
 
         # Watch parameter changes to re-validate and re-enable controls when fixed
         try:
-            # trace_add available in modern tkinter; fall back to trace
             try:
                 self.cache_size.trace_add('write', lambda *a: self._on_params_changed())
                 self.line_size.trace_add('write', lambda *a: self._on_params_changed())
                 self.associativity.trace_add('write', lambda *a: self._on_params_changed())
+                # update backend when write policy changes in the UI
+                try:
+                    self.write_hit_policy.trace_add('write', lambda *a: self._on_write_policy_changed())
+                except Exception:
+                    pass
                 try:
                     self.ram_size.trace_add('write', lambda *a: self._on_ram_changed())
                 except Exception:
@@ -147,6 +143,10 @@ class UserInterface:
                     self.cache_size.trace('w', lambda *a: self._on_params_changed())
                     self.line_size.trace('w', lambda *a: self._on_params_changed())
                     self.associativity.trace('w', lambda *a: self._on_params_changed())
+                    try:
+                        self.write_hit_policy.trace('w', lambda *a: self._on_write_policy_changed())
+                    except Exception:
+                        pass
                     try:
                         self.ram_size.trace('w', lambda *a: self._on_ram_changed())
                     except Exception:
@@ -266,6 +266,16 @@ class UserInterface:
         self.rep_buttons['Random'].grid(row=0, column=1, padx=2)
         self.rep_buttons['FIFO'] = ttk.Button(rep_btn_frame, text='FIFO', width=6, command=lambda: self._set_replacement('FIFO'))
         self.rep_buttons['FIFO'].grid(row=0, column=2, padx=2)
+        row_counter += 1
+
+        # Write policy (hit) dropdown: allow user to choose write-back or write-through
+        try:
+            ttk.Label(self.configuration_container, text="Write policy:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
+            wp_menu = ttk.OptionMenu(self.configuration_container, self.write_hit_policy, self.write_hit_policy.get(), 'write-back', 'write-through')
+            wp_menu.config(width=option_menu_width)
+            wp_menu.grid(row=row_counter, column=1, sticky='w')
+        except Exception:
+            pass
         row_counter += 1
 
         # Input
@@ -836,7 +846,14 @@ class UserInterface:
             r = 0
             c = 0
             for i in range(capacity):
-                lbl = tk.Label(self.cache_display_frame, text=f"{i}", relief='ridge', width=8, height=3, bg='#111111', fg='#FFFFFF')
+                # show index and reserve a second line for a dirty indicator (blank by default)
+                lbl = tk.Label(self.cache_display_frame, text=f"{i}", relief='ridge', width=8, height=3, bg='#111111', fg='#FFFFFF', justify='center')
+                # store index and dirty flag on the widget for later updates
+                try:
+                    lbl._index = i
+                    lbl._dirty = False
+                except Exception:
+                    pass
                 lbl.grid(row=r, column=c, padx=4, pady=4)
                 self.frame_labels.append(lbl)
                 c += 1
@@ -1508,10 +1525,28 @@ class UserInterface:
                             break
                         block = sets[s][w]
                         lbl = self.frame_labels[k]
-                        if block.valid:
+                        # base appearance for valid/invalid
+                        if getattr(block, 'valid', False):
                             lbl.configure(bg='#444444')
                         else:
                             lbl.configure(bg='#222222')
+                        # show dirty indicator when write-back policy is active
+                        try:
+                            if getattr(block, 'dirty', False) and getattr(core, 'write_policy', '') == 'write-back':
+                                # place a small 'D' on second line and change foreground for visibility
+                                try:
+                                    lbl.configure(text=f"{k}\nD", fg='#FFD54F')
+                                    lbl._dirty = True
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    lbl.configure(text=f"{k}", fg='#FFFFFF')
+                                    lbl._dirty = False
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         k += 1
 
                 # highlight accessed set/way
@@ -1527,6 +1562,16 @@ class UserInterface:
                             is_hit = bool(info.get('hit'))
                             color = '#8BC34A' if is_hit else '#F44336'
                             lbl.configure(bg=color)
+                            # ensure dirty indicator remains visible if present
+                            try:
+                                block = sets[sidx][widx]
+                                if getattr(block, 'dirty', False) and getattr(core, 'write_policy', '') == 'write-back':
+                                    try:
+                                        lbl.configure(text=f"{label_index}\nD", fg='#FFD54F')
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                             # sync RAM highlight for mapped base if available
                             try:
                                 # only color RAM when this access actually touched memory
@@ -1687,8 +1732,13 @@ class UserInterface:
                             text_color = '#FFFFFF'
                         else:
                             is_write = bool(marker)
-                            fill = '#3E2F2F' if is_write else '#153B21'
-                            text_color = '#FFB4B4' if is_write else '#A8E6A1'
+                            # vivid colors: red for writes, green for reads
+                            if is_write:
+                                fill = '#F44336'
+                                text_color = '#FFFFFF'
+                            else:
+                                fill = '#2E7D32'
+                                text_color = '#FFFFFF'
                     else:
                         fill = '#111111'
                         text_color = '#DDDDDD'
@@ -1709,7 +1759,7 @@ class UserInterface:
                     except Exception:
                         pass
                     # center the address text for better appearance when cells are narrow/wide
-                    canvas.create_text(x + (cell_w - 4) / 2, y + cell_h / 2, text=f"{addr:#04x}", fill='#8BC34A', font=(self.font_container, 9, 'bold'))
+                    canvas.create_text(x + (cell_w - 4) / 2, y + cell_h / 2, text=f"{addr:#04x}", fill=text_color, font=(self.font_container, 9, 'bold'))
                 except Exception:
                     pass
             # ensure scrollbar is visible/updated
@@ -2183,6 +2233,70 @@ class UserInterface:
                     self._append_log(f"RAM recreated: size={size} bytes, line_size={line}")
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def _on_write_policy_changed(self, *args):
+        """Handler called when the write policy option in the UI changes.
+
+        Update the underlying core cache's `write_policy` to match the UI.
+        If switching to `write-through` from `write-back`, flush dirty
+        blocks to the backing RAM (best-effort) and clear their dirty bits so
+        the UI is consistent. Finally refresh the cache display.
+        """
+        wp = None
+        try:
+            wp = self.write_hit_policy.get()
+        except Exception:
+            pass
+
+        core = self.get_core_cache()
+        if core is None:
+            return
+
+        # update core object's policy (best-effort)
+        try:
+            core.write_policy = wp
+        except Exception:
+            pass
+
+        # If switching to write-through, flush dirty lines to RAM and clear them
+        if wp == 'write-through':
+            try:
+                line_size = int(getattr(core, 'line_size', 1) or 1)
+                num_sets = int(getattr(core, 'num_sets', 1) or 1)
+                for s in range(len(core.sets)):
+                    for w in range(len(core.sets[s])):
+                        block = core.sets[s][w]
+                        try:
+                            if getattr(block, 'dirty', False):
+                                # compute evicted block base and write to RAM
+                                try:
+                                    tag = int(block.tag)
+                                    block_addr = tag * num_sets + int(s)
+                                    base = block_addr * line_size
+                                except Exception:
+                                    base = None
+                                try:
+                                    if base is not None and getattr(self, 'ram_obj', None) is not None:
+                                        try:
+                                            self.ram_obj.write(base, 1)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                                try:
+                                    block.dirty = False
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Refresh the cache display so dirty indicators update immediately
+        try:
+            self.update_cache_display({})
         except Exception:
             pass
 

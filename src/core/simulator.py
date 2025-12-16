@@ -7,7 +7,7 @@ from .ram import RAM
 from ..data.stats_export import Statistics
 
 
-class CacheSimulator:
+class CacheSimulator: 
     def __init__(self, cache: Cache, stats: Optional[Statistics] = None, ram: Optional[RAM] = None):
         self.cache = cache
         self.stats = stats or Statistics()
@@ -44,20 +44,57 @@ class CacheSimulator:
         hit, set_index, way_index, evicted, mem_read, mem_write = self.cache.access(address, is_write=is_write, write_miss_policy=write_miss_policy)
         self.stats.record_access(hit)
 
+        # perform backing-store operations when requested
         if mem_read:
             self.stats.memory_reads += 1
             try:
                 if self.ram is not None:
-                    # perform a backing read
-                    self.ram.read(address)
+                    # read the whole cache line (use base-aligned address)
+                    line_size = getattr(self.cache, 'line_size', 1) or 1
+                    base = (int(address) // int(line_size)) * int(line_size)
+                    try:
+                        self.ram.read(base)
+                    except Exception:
+                        # best-effort single-byte read fallback
+                        try:
+                            self.ram.read(address)
+                        except Exception:
+                            pass
             except Exception:
                 pass
+
         if mem_write:
             self.stats.memory_writes += 1
             try:
                 if self.ram is not None:
-                    # perform a backing write 
-                    self.ram.write(address, 1)
+                    # If an evicted dirty block triggered the write (write-back),
+                    # write back the evicted block's base address. Otherwise,
+                    # for write-through, write the accessed address (or its base).
+                    line_size = getattr(self.cache, 'line_size', 1) or 1
+                    if evicted is not None and getattr(evicted, 'dirty', False) and getattr(self.cache, 'write_policy', '') == 'write-back':
+                        # compute evicted block base address: block_addr = tag * num_sets + set_index
+                        try:
+                            num_sets = getattr(self.cache, 'num_sets', 1) or 1
+                            block_addr = int(evicted.tag) * int(num_sets) + int(set_index)
+                            base = block_addr * int(line_size)
+                            # perform a write to the base address of the evicted line
+                            self.ram.write(base, 1)
+                        except Exception:
+                            # fallback: write the accessed address
+                            try:
+                                self.ram.write(address, 1)
+                            except Exception:
+                                pass
+                    else:
+                        # write-through or other explicit mem write: write base-aligned address
+                        try:
+                            base = (int(address) // int(line_size)) * int(line_size)
+                            self.ram.write(base, 1)
+                        except Exception:
+                            try:
+                                self.ram.write(address, 1)
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
