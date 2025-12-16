@@ -1,10 +1,7 @@
 """Generic k-way set-associative cache wrapper.
 
 This wrapper builds a core Cache with an explicit associativity `k` (1..num_blocks).
-UI should call this when the user wants a generic k-associative configuration.
-
-Student note: this is a thin wrapper that mirrors the other wrappers' API
-(load_instruction/store_instruction) so the UI can drive it uniformly.
+UI calls this for the k-associative configuration.
 """
 from src.core.cache import Cache
 from src.core.simulator import CacheSimulator
@@ -23,8 +20,7 @@ class K_associative_cache:
         raw_cache_size = max(1, int(self.ui.cache_size.get()))
         num_blocks = max(1, raw_cache_size // line_size)
 
-        # Determine associativity (k). Prefer explicit constructor value,
-        # otherwise read from UI variable.
+        # Determine associativity (k)
         k = int(self.associativity) if self.associativity is not None else max(1, int(self.ui.associativity.get()))
         if k < 1:
             k = 1
@@ -32,19 +28,18 @@ class K_associative_cache:
         if k > num_blocks:
             k = num_blocks
         associativity = k
-        # Do NOT mutate number of blocks here. The UI validation ensures
-        # `num_blocks % associativity == 0`. If the values are invalid the
-        # wrapper will still build but the core Cache may further adjust; in
-        # practice the UI prevents invalid combos.
+        # The UI validation ensures
+        # `num_blocks % associativity == 0`. If the values are invalid,
+        # the UI prevents invalid combos.
 
         write_policy = self.ui.write_hit_policy.get()
         replacement = self.ui.replacement_policy.get()
 
-        # Create core cache and simulator
+        # Create cache and simulator
         self.cache = Cache(num_blocks=num_blocks, line_size=line_size, associativity=associativity,
                            replacement=replacement, write_policy=write_policy,
                            write_miss_policy=self.ui.write_miss_policy.get())
-        # forward optional RAM from UI
+        # forward RAM from UI
         self.sim = CacheSimulator(self.cache, ram=getattr(self.ui, 'ram_obj', None))
 
     def load_instruction(self, binary_value, hex_value):
