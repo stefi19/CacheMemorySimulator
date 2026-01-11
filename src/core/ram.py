@@ -24,12 +24,15 @@ class RAM:
             self.line_size = max(1, int(line_size))
         except Exception:
             self.line_size = 1
-        # store memory as a sparse dict: address -> value (int)
-        self.storage = {}
+        # store memory as: address -> value (int)
+        # initialize RAM with sequential default values (1,2,3,...)
+        try:
+            self.storage = {i: i + 1 for i in range(self.size)}
+        except Exception:
+            self.storage = {}
 
     def _clamp_addr(self, address: int) -> int:
-        # Validate address and raise on out-of-bounds. The previous
-        # implementation silently clamped addresses which hid bugs.
+        # Validate address and raise on out-of-bounds.
         if not isinstance(address, int):
             raise TypeError(f"address must be int, got {type(address).__name__}")
         if address < 0 or address >= self.size:
@@ -50,6 +53,12 @@ class RAM:
 
     def reset(self):
         try:
+            # clear and refill with default sequential values
             self.storage.clear()
+            for i in range(self.size):
+                self.storage[i] = i + 1
         except Exception:
-            self.storage = {}
+            try:
+                self.storage = {i: i + 1 for i in range(self.size)}
+            except Exception:
+                self.storage = {}

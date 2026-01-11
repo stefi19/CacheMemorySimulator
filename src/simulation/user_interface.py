@@ -284,6 +284,16 @@ class UserInterface:
         inp_entry.grid(row=row_counter, column=1)
         # keep a reference to the Entry so we can rebind events when needed
         self.input_entry = inp_entry
+        # Write-values input: comma-separated values used for manual Write operations
+        row_counter += 1
+        try:
+            ttk.Label(self.configuration_container, text="Write values:", font=(self.font_container, 11), foreground=self.font_color_1, background=self.background_container).grid(row=row_counter, column=0, sticky=tk.W, pady=3)
+            self.write_values = tk.StringVar(value="1,2,3")
+            self.write_values_entry = tk.Entry(self.configuration_container, textvariable=self.write_values, width=entry_width)
+            self.write_values_entry.grid(row=row_counter, column=1)
+        except Exception:
+            self.write_values = tk.StringVar(value="")
+            self.write_values_entry = None
         # install bindings so decode panel updates when the user types
         try:
             self._ensure_input_bindings()
@@ -417,10 +427,63 @@ class UserInterface:
 
         # Replacement policy state panel removed (simplified UI)
 
-        # Cache display area
+        # Cache display area (scrollable vertical list)
         self.cache_display_frame = ttk.Frame(container_right, padding="8")
         self.cache_display_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
         self.cache_display_frame.configure(style="InputFrame.TFrame")
+        # inside cache_display_frame we host a Canvas+Frame to allow vertical scrolling
+        try:
+            self.cache_canvas = tk.Canvas(self.cache_display_frame, height=240, bg='#0b0b0b', highlightthickness=0)
+            self.cache_vscroll = ttk.Scrollbar(self.cache_display_frame, orient='vertical', command=self.cache_canvas.yview)
+            self.cache_canvas.configure(yscrollcommand=self.cache_vscroll.set)
+            self.cache_canvas.grid(row=0, column=0, sticky='nsew')
+            self.cache_vscroll.grid(row=0, column=1, sticky='ns')
+            # inner frame that will contain per-line widgets
+            self.cache_list_inner = ttk.Frame(self.cache_canvas)
+            self.cache_inner_id = self.cache_canvas.create_window((0, 0), window=self.cache_list_inner, anchor='nw')
+            # configure resize binding so scrollregion updates
+            def _on_cache_inner_config(event):
+                try:
+                    self.cache_canvas.configure(scrollregion=self.cache_canvas.bbox('all'))
+                except Exception:
+                    pass
+            self.cache_list_inner.bind('<Configure>', _on_cache_inner_config)
+            # allow the inner frame to expand to canvas width on resize
+            def _on_cache_canvas_config(event):
+                try:
+                    self.cache_canvas.itemconfig(self.cache_inner_id, width=event.width)
+                except Exception:
+                    pass
+            self.cache_canvas.bind('<Configure>', _on_cache_canvas_config)
+
+            # mouse wheel scrolling when pointer is over the cache list
+            def _on_cache_mousewheel(event):
+                try:
+                    # event.delta works on Windows/macOS (multiples of 120)
+                    delta = 0
+                    if hasattr(event, 'delta'):
+                        delta = int(-1 * (event.delta / 120))
+                    else:
+                        # fallback for X11 Button-4/5 handled elsewhere
+                        delta = 0
+                    if delta:
+                        self.cache_canvas.yview_scroll(delta, 'units')
+                except Exception:
+                    pass
+
+            # bind enter/leave to capture wheel events
+            try:
+                self.cache_list_inner.bind('<Enter>', lambda e: self.cache_canvas.bind_all('<MouseWheel>', _on_cache_mousewheel))
+                self.cache_list_inner.bind('<Leave>', lambda e: self.cache_canvas.unbind_all('<MouseWheel>'))
+                # also support Linux wheel events
+                self.cache_list_inner.bind('<Button-4>', lambda e: self.cache_canvas.yview_scroll(-1, 'units'))
+                self.cache_list_inner.bind('<Button-5>', lambda e: self.cache_canvas.yview_scroll(1, 'units'))
+            except Exception:
+                pass
+        except Exception:
+            self.cache_canvas = None
+            self.cache_vscroll = None
+            self.cache_list_inner = None
 
         # small status row showing num_blocks / num_sets for quick debugging
         try:
@@ -454,17 +517,44 @@ class UserInterface:
         # RAM display panel (visualizes a small window into the backing store)
         try:
             self.ram_frame = ttk.LabelFrame(container_right, text="RAM (backing store)", padding=6)
-            self.ram_frame.grid(row=5, column=0, sticky='ew', pady=(8, 8))
-            # canvas will show a compact grid of line entries (addr:value)
-            self.ram_canvas = tk.Canvas(self.ram_frame, height=120, bg='#0b0b0b', highlightthickness=0)
-            self.ram_canvas.grid(row=0, column=0, sticky='ew')
-            # small scrollbar for canvas (optional)
+            self.ram_frame.grid(row=5, column=0, sticky='nsew', pady=(8, 8))
+            # Create a scrollable canvas + inner frame to host per-line RAM widgets
+            self.ram_canvas = tk.Canvas(self.ram_frame, height=180, bg='#0b0b0b', highlightthickness=0)
+            self.ram_vscroll = ttk.Scrollbar(self.ram_frame, orient='vertical', command=self.ram_canvas.yview)
             try:
-                self.ram_vscroll = ttk.Scrollbar(self.ram_frame, orient='vertical', command=self.ram_canvas.yview)
-                self.ram_vscroll.grid(row=0, column=1, sticky='ns')
                 self.ram_canvas.configure(yscrollcommand=self.ram_vscroll.set)
             except Exception:
-                self.ram_vscroll = None
+                pass
+            self.ram_canvas.grid(row=0, column=0, sticky='nsew')
+            self.ram_vscroll.grid(row=0, column=1, sticky='ns')
+            # inner frame
+            self.ram_list_inner = ttk.Frame(self.ram_canvas)
+            self.ram_inner_id = self.ram_canvas.create_window((0, 0), window=self.ram_list_inner, anchor='nw')
+            def _on_ram_inner_config(ev):
+                try:
+                    self.ram_canvas.configure(scrollregion=self.ram_canvas.bbox('all'))
+                except Exception:
+                    pass
+            self.ram_list_inner.bind('<Configure>', _on_ram_inner_config)
+            def _on_ram_canvas_config(ev):
+                try:
+                    self.ram_canvas.itemconfig(self.ram_inner_id, width=ev.width)
+                except Exception:
+                    pass
+            self.ram_canvas.bind('<Configure>', _on_ram_canvas_config)
+            # mouse wheel support
+            try:
+                self.ram_list_inner.bind('<Enter>', lambda e: self.ram_canvas.bind_all('<MouseWheel>', lambda ev: self.ram_canvas.yview_scroll(int(-1*(ev.delta/120)), 'units')))
+                self.ram_list_inner.bind('<Leave>', lambda e: self.ram_canvas.unbind_all('<MouseWheel>'))
+            except Exception:
+                try:
+                    self.ram_list_inner.bind('<Button-4>', lambda e: self.ram_canvas.yview_scroll(-1, 'units'))
+                    self.ram_list_inner.bind('<Button-5>', lambda e: self.ram_canvas.yview_scroll(1, 'units'))
+                except Exception:
+                    pass
+            # container for entries
+            self.ram_line_entries = []
+            self._ram_base_to_index = {}
         except Exception:
             self.ram_frame = None
             self.ram_canvas = None
@@ -494,6 +584,14 @@ class UserInterface:
         # small hit-rate chart
         self.hit_canvas = tk.Canvas(stats_frame, width=180, height=52, bg=self.background_container, highlightthickness=0)
         self.hit_canvas.grid(row=0, column=4, rowspan=2, padx=(16, 0))
+        # Last-read value box: shows the value retrieved on the most recent read
+        try:
+            self.last_read_value = tk.StringVar(value='-')
+            ttk.Label(stats_frame, text="Last read:", foreground=self.font_color_1, background=self.background_container, font=(self.font_container, 10)).grid(row=0, column=5, sticky='e', padx=(12, 4))
+            self.last_read_value_label = tk.Label(stats_frame, textvariable=self.last_read_value, foreground='#FFFFFF', background='#111111', font=(self.font_container, 10, 'bold'), width=12)
+            self.last_read_value_label.grid(row=0, column=6, sticky='w')
+        except Exception:
+            self.last_read_value = None
         # export buttons for chart: JSON (data) and PS/PDF (graphic)
         try:
             exp_frame = ttk.Frame(stats_frame)
@@ -820,8 +918,9 @@ class UserInterface:
         """Create simple rectangular labels representing cache frames."""
         try:
             # capacity is number of blocks (cache_size // line_size)
-            # enforce a hard UI limit of 20 labels to keep the layout usable
-            capacity = min(int(max(1, capacity)), 20)
+            # allow a larger number now that the list is scrollable
+            capacity = int(max(1, capacity))
+            capacity = min(capacity, 256)
             # update live status labels showing number of blocks and sets
             try:
                 self.num_blocks_var.set(str(int(capacity)))
@@ -835,31 +934,44 @@ class UserInterface:
                 except Exception:
                     pass
             # Clear previous
-            for w in getattr(self, 'frame_labels', []):
+            # destroy old widgets
+            for entry in getattr(self, 'frame_labels', []):
                 try:
-                    w.destroy()
+                    # entry may be a dict with 'frame'
+                    frm = entry.get('frame') if isinstance(entry, dict) else entry
+                    if hasattr(frm, 'destroy'):
+                        frm.destroy()
                 except Exception:
                     pass
             self.frame_labels = []
 
-            cols = min(8, max(1, int(math.sqrt(max(1, capacity)))))
-            r = 0
-            c = 0
+            # create vertical list of frames inside the scrollable inner frame
+            parent = getattr(self, 'cache_list_inner', None) or self.cache_display_frame
+            try:
+                line_size = max(1, int(self.line_size.get()))
+            except Exception:
+                line_size = 1
             for i in range(capacity):
-                # show index and reserve a second line for a dirty indicator (blank by default)
-                lbl = tk.Label(self.cache_display_frame, text=f"{i}", relief='ridge', width=8, height=3, bg='#111111', fg='#FFFFFF', justify='center')
-                # store index and dirty flag on the widget for later updates
                 try:
-                    lbl._index = i
-                    lbl._dirty = False
+                    line_frame = ttk.Frame(parent, padding=(2, 2))
+                    line_frame.grid(row=i, column=0, sticky='ew', pady=2)
+                    # index / dirty indicator on the left
+                    idx_lbl = tk.Label(line_frame, text=f"#{i}", width=6, bg='#111111', fg='#FFFFFF', relief='ridge')
+                    idx_lbl.pack(side='left', padx=(0, 6))
+                    # byte container shows each byte/word in the line
+                    bytes_frame = ttk.Frame(line_frame)
+                    bytes_frame.pack(side='left', fill='x', expand=True)
+                    byte_labels = []
+                    for b in range(line_size):
+                        bl = tk.Label(bytes_frame, text='--', width=6, bg='#222222', fg='#DDDDDD', relief='groove')
+                        bl.pack(side='left', padx=2)
+                        byte_labels.append(bl)
+                    # dirty marker label to the right
+                    dirt_lbl = tk.Label(line_frame, text='', width=2, bg='#111111', fg='#FFD54F')
+                    dirt_lbl.pack(side='right', padx=(6, 0))
+                    self.frame_labels.append({'frame': line_frame, 'index_label': idx_lbl, 'byte_labels': byte_labels, 'dirty_label': dirt_lbl})
                 except Exception:
                     pass
-                lbl.grid(row=r, column=c, padx=4, pady=4)
-                self.frame_labels.append(lbl)
-                c += 1
-                if c >= cols:
-                    c = 0
-                    r += 1
         except Exception:
             pass
 
@@ -917,6 +1029,75 @@ class UserInterface:
                         self.ram_canvas.delete('all')
                     except Exception:
                         pass
+                # When the canvas is cleared, also clear the cached widget list so
+                # update_ram_display() will recreate row widgets and reflect the
+                # reinitialized RAM contents visually.
+                try:
+                    self.ram_line_entries = []
+                except Exception:
+                    pass
+                try:
+                    self._ram_base_to_index = {}
+                except Exception:
+                    pass
+                # If we deleted canvas contents above, recreate the inner window
+                # so the inner frame is attached again and update_ram_display can
+                # recreate row widgets normally.
+                try:
+                    if getattr(self, 'ram_canvas', None) and getattr(self, 'ram_list_inner', None):
+                        try:
+                            # create window and store id
+                            self.ram_inner_id = self.ram_canvas.create_window((0, 0), window=self.ram_list_inner, anchor='nw')
+                        except Exception:
+                            pass
+                        try:
+                            def _on_ram_inner_config(ev):
+                                try:
+                                    self.ram_canvas.configure(scrollregion=self.ram_canvas.bbox('all'))
+                                except Exception:
+                                    pass
+                            self.ram_list_inner.bind('<Configure>', _on_ram_inner_config)
+                        except Exception:
+                            pass
+                        try:
+                            def _on_ram_canvas_config(ev):
+                                try:
+                                    self.ram_canvas.itemconfig(self.ram_inner_id, width=ev.width)
+                                except Exception:
+                                    pass
+                            self.ram_canvas.bind('<Configure>', _on_ram_canvas_config)
+                        except Exception:
+                            pass
+                        try:
+                            # mouse wheel support
+                            self.ram_list_inner.bind('<Enter>', lambda e: self.ram_canvas.bind_all('<MouseWheel>', lambda ev: self.ram_canvas.yview_scroll(int(-1*(ev.delta/120)), 'units')))
+                            self.ram_list_inner.bind('<Leave>', lambda e: self.ram_canvas.unbind_all('<MouseWheel>'))
+                        except Exception:
+                            try:
+                                self.ram_list_inner.bind('<Button-4>', lambda e: self.ram_canvas.yview_scroll(-1, 'units'))
+                                self.ram_list_inner.bind('<Button-5>', lambda e: self.ram_canvas.yview_scroll(1, 'units'))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                # Reinitialize RAM contents so reset restores default sequential values
+                try:
+                    if getattr(self, 'ram_obj', None) is not None:
+                        try:
+                            self.ram_obj.reset()
+                        except Exception:
+                            # If reset fails, attempt to recreate the RAM object
+                            try:
+                                self._ensure_ram_object()
+                            except Exception:
+                                pass
+                        # refresh the RAM display to show reinitialized values
+                        try:
+                            self.update_ram_display()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
@@ -1329,6 +1510,20 @@ class UserInterface:
         inspect available structures and color labels accordingly.
         """
         try:
+            # Update the small "last read" display when this access was a read.
+            try:
+                if info and not info.get('is_write', False):
+                    self._display_last_read(info)
+                else:
+                    # clear on writes or absent info
+                    try:
+                        if getattr(self, 'last_read_value', None) is not None:
+                            self.last_read_value.set('-')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             # determine core cache
             core = None
             wrapper = getattr(self, 'cache_wrapper', None)
@@ -1341,10 +1536,29 @@ class UserInterface:
             elif hasattr(wrapper, 'sets'):
                 core = wrapper
 
-            # Clear all labels to neutral
-            for lbl in getattr(self, 'frame_labels', []):
+            # Clear all labels to neutral (reset index label and byte labels)
+            for entry in getattr(self, 'frame_labels', []):
                 try:
-                    lbl.configure(bg='#111111')
+                    if isinstance(entry, dict):
+                        idx_lbl = entry.get('index_label')
+                        if idx_lbl is not None:
+                            idx_lbl.configure(bg='#111111')
+                        for bl in entry.get('byte_labels', []):
+                            try:
+                                bl.configure(text='--', bg='#222222', fg='#DDDDDD')
+                            except Exception:
+                                pass
+                        dirt_lbl = entry.get('dirty_label')
+                        if dirt_lbl is not None:
+                            try:
+                                dirt_lbl.configure(text='')
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            entry.configure(bg='#111111')
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 
@@ -1356,30 +1570,84 @@ class UserInterface:
                 for i, line in enumerate(wrapper.cache_contents):
                     valid = line[1] == '1'
                     tag = line[2]
-                    lbl = self.frame_labels[i] if i < len(self.frame_labels) else None
-                    if lbl:
-                        if valid:
-                            lbl.configure(bg='#444444')
-                        else:
-                            lbl.configure(bg='#222222')
+                    entry = self.frame_labels[i] if i < len(self.frame_labels) else None
+                    if entry:
+                        try:
+                            idx_lbl = entry.get('index_label')
+                            b_labels = entry.get('byte_labels', [])
+                            dirt_lbl = entry.get('dirty_label')
+                            if valid:
+                                idx_lbl.configure(bg='#444444')
+                            else:
+                                idx_lbl.configure(bg='#222222')
+                            # populate bytes from RAM if tag present
+                            try:
+                                if valid and tag is not None:
+                                    try:
+                                        tag_int = int(tag, 0)
+                                    except Exception:
+                                        try:
+                                            tag_int = int(tag)
+                                        except Exception:
+                                            tag_int = None
+                                    if tag_int is not None:
+                                        nb = getattr(wrapper, 'num_blocks', None) or getattr(wrapper, 'cache', None) and getattr(wrapper.cache, 'num_blocks', None)
+                                        try:
+                                            line_size = getattr(wrapper, 'cache', None) and getattr(wrapper.cache, 'line_size', None) or max(1, int(self.line_size.get()))
+                                        except Exception:
+                                            line_size = max(1, int(self.line_size.get()))
+                                        if nb:
+                                            block_addr = tag_int * nb + i
+                                            base = block_addr * line_size
+                                            ram = getattr(self, 'ram_obj', None)
+                                            for off in range(len(b_labels)):
+                                                try:
+                                                    val = ram.read(base + off) if ram is not None else None
+                                                    text = f"{val:#02x}" if val is not None else '--'
+                                                    b_labels[off].configure(text=text, bg='#333333', fg='#FFFFFF')
+                                                except Exception:
+                                                    b_labels[off].configure(text='--', bg='#222222', fg='#DDDDDD')
+                            except Exception:
+                                for bl in b_labels:
+                                    try:
+                                        bl.configure(text='--', bg='#222222', fg='#DDDDDD')
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
                 # highlight the specific accessed line if available in info
                 set_idx = info.get('set_index')
                 way_idx = info.get('way_index')
                 try:
                     idx = int(set_idx) if set_idx is not None else None
                     if idx is not None and idx < len(self.frame_labels):
-                        lbl = self.frame_labels[idx]
+                        entry = self.frame_labels[idx]
                         is_hit = bool(info.get('hit'))
                         color = '#8BC34A' if is_hit else '#F44336'
-                        lbl.configure(bg=color)
+                        try:
+                            # color the index label to indicate hit/miss
+                            idx_lbl = entry.get('index_label') if isinstance(entry, dict) else entry
+                            idx_lbl.configure(bg=color)
+                            # auto-scroll to this label so it's visible
+                            try:
+                                self._scroll_cache_to_label(idx)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
                         # only color RAM when this access caused an actual memory read/write
                         try:
                             if info and (info.get('mem_read') or info.get('mem_write')):
                                 base = getattr(self, '_last_label_to_ram_base', {}).get(idx)
                                 if base is not None:
                                     try:
-                                        self._note_ram_access_color(base, color)
-                                        self.update_ram_display()
+                                                self._note_ram_access_color(base, color)
+                                                try:
+                                                    # also auto-scroll RAM to the base
+                                                    self._scroll_ram_to_base(base)
+                                                except Exception:
+                                                    pass
+                                                self.update_ram_display()
                                     except Exception:
                                         pass
                         except Exception:
@@ -1525,28 +1793,69 @@ class UserInterface:
                             break
                         block = sets[s][w]
                         lbl = self.frame_labels[k]
-                        # base appearance for valid/invalid
-                        if getattr(block, 'valid', False):
-                            lbl.configure(bg='#444444')
-                        else:
-                            lbl.configure(bg='#222222')
-                        # show dirty indicator when write-back policy is active
-                        try:
-                            if getattr(block, 'dirty', False) and getattr(core, 'write_policy', '') == 'write-back':
-                                # place a small 'D' on second line and change foreground for visibility
+                        # base appearance for valid/invalid and update byte labels
+                        entry = self.frame_labels[k] if k < len(self.frame_labels) else None
+                        if entry:
+                            try:
+                                idx_lbl = entry.get('index_label')
+                                b_labels = entry.get('byte_labels', [])
+                                dirt_lbl = entry.get('dirty_label')
+                                if getattr(block, 'valid', False):
+                                    idx_lbl.configure(bg='#444444')
+                                else:
+                                    idx_lbl.configure(bg='#222222')
+                                # populate byte labels from RAM if available
                                 try:
-                                    lbl.configure(text=f"{k}\nD", fg='#FFD54F')
-                                    lbl._dirty = True
+                                    line_size = getattr(core, 'line_size', None) or max(1, int(self.line_size.get()))
+                                except Exception:
+                                    line_size = max(1, int(self.line_size.get()))
+                                num_sets = getattr(core, 'num_sets', None) or 1
+                                try:
+                                    tag = int(getattr(block, 'tag'))
+                                except Exception:
+                                    tag = None
+                                if getattr(block, 'valid', False) and tag is not None:
+                                    block_addr = tag * num_sets + s
+                                    base = block_addr * line_size
+                                    # Prefer per-byte values stored in cache block (so writes
+                                    # to dirty blocks are visible). Fall back to RAM when
+                                    # block.data is not present.
+                                    try:
+                                        if getattr(block, 'data', None) is not None:
+                                            for off in range(line_size):
+                                                try:
+                                                    val = block.data[off] if off < len(block.data) else None
+                                                except Exception:
+                                                    val = None
+                                                text = f"{val:#02x}" if val is not None else '--'
+                                                if off < len(b_labels):
+                                                    b_labels[off].configure(text=text, bg='#333333', fg='#FFFFFF')
+                                        else:
+                                            ram = getattr(self, 'ram_obj', None)
+                                            for off in range(line_size):
+                                                val = ram.read(base + off) if ram is not None else None
+                                                text = f"{val:#02x}" if val is not None else '--'
+                                                if off < len(b_labels):
+                                                    b_labels[off].configure(text=text, bg='#333333', fg='#FFFFFF')
+                                    except Exception:
+                                        for off in range(len(b_labels)):
+                                            b_labels[off].configure(text='--', bg='#222222', fg='#DDDDDD')
+                                else:
+                                    for bl in b_labels:
+                                        try:
+                                            bl.configure(text='--', bg='#222222', fg='#DDDDDD')
+                                        except Exception:
+                                            pass
+                                # dirty indicator
+                                try:
+                                    if getattr(block, 'dirty', False) and getattr(core, 'write_policy', '') == 'write-back':
+                                        dirt_lbl.configure(text='D')
+                                    else:
+                                        dirt_lbl.configure(text='')
                                 except Exception:
                                     pass
-                            else:
-                                try:
-                                    lbl.configure(text=f"{k}", fg='#FFFFFF')
-                                    lbl._dirty = False
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
+                            except Exception:
+                                pass
                         k += 1
 
                 # highlight accessed set/way
@@ -1558,16 +1867,26 @@ class UserInterface:
                         widx = int(widx)
                         label_index = sidx * ways + widx
                         if label_index < len(self.frame_labels):
-                            lbl = self.frame_labels[label_index]
+                            entry = self.frame_labels[label_index]
                             is_hit = bool(info.get('hit'))
                             color = '#8BC34A' if is_hit else '#F44336'
-                            lbl.configure(bg=color)
+                            try:
+                                idx_lbl = entry.get('index_label') if isinstance(entry, dict) else entry
+                                idx_lbl.configure(bg=color)
+                                try:
+                                    self._scroll_cache_to_label(label_index)
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
                             # ensure dirty indicator remains visible if present
                             try:
                                 block = sets[sidx][widx]
+                                dirt_lbl = entry.get('dirty_label') if isinstance(entry, dict) else None
                                 if getattr(block, 'dirty', False) and getattr(core, 'write_policy', '') == 'write-back':
                                     try:
-                                        lbl.configure(text=f"{label_index}\nD", fg='#FFD54F')
+                                        if dirt_lbl is not None:
+                                            dirt_lbl.configure(text='D')
                                     except Exception:
                                         pass
                             except Exception:
@@ -1622,6 +1941,73 @@ class UserInterface:
         except Exception:
             pass
 
+    def _scroll_cache_to_label(self, index: int):
+        """Scroll the cache canvas so the given index is centered (if possible)."""
+        try:
+            if not getattr(self, 'cache_canvas', None) or not getattr(self, 'cache_list_inner', None):
+                return
+            if index is None or index < 0 or index >= len(getattr(self, 'frame_labels', [])):
+                return
+            entry = self.frame_labels[index]
+            widget = entry.get('frame') if isinstance(entry, dict) else entry
+            # ensure sizes are up-to-date
+            self.cache_canvas.update_idletasks()
+            widget.update_idletasks()
+            inner_h = self.cache_list_inner.winfo_height() or 1
+            canvas_h = self.cache_canvas.winfo_height() or 1
+            y = widget.winfo_y()
+            h = widget.winfo_height() or 1
+            # target scroll so the widget center aligns with canvas center
+            target = y + h / 2 - canvas_h / 2
+            max_scroll = max(1, inner_h - canvas_h)
+            frac = target / max_scroll if max_scroll > 0 else 0.0
+            if frac < 0.0:
+                frac = 0.0
+            if frac > 1.0:
+                frac = 1.0
+            try:
+                self.cache_canvas.yview_moveto(frac)
+            except Exception:
+                try:
+                    self.cache_canvas.yview_scroll(int(frac * 10), 'units')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _scroll_ram_to_base(self, base: int):
+        """Scroll the RAM canvas so the given base address row is visible/centered."""
+        try:
+            if not getattr(self, 'ram_canvas', None) or not getattr(self, 'ram_list_inner', None):
+                return
+            idx = self._ram_base_to_index.get(base)
+            if idx is None:
+                return
+            entry = self.ram_line_entries[idx]
+            widget = entry.get('frame')
+            self.ram_canvas.update_idletasks()
+            widget.update_idletasks()
+            inner_h = self.ram_list_inner.winfo_height() or 1
+            canvas_h = self.ram_canvas.winfo_height() or 1
+            y = widget.winfo_y()
+            h = widget.winfo_height() or 1
+            target = y + h / 2 - canvas_h / 2
+            max_scroll = max(1, inner_h - canvas_h)
+            frac = target / max_scroll if max_scroll > 0 else 0.0
+            if frac < 0.0:
+                frac = 0.0
+            if frac > 1.0:
+                frac = 1.0
+            try:
+                self.ram_canvas.yview_moveto(frac)
+            except Exception:
+                try:
+                    self.ram_canvas.yview_scroll(int(frac * 10), 'units')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def update_ram_display(self):
         """Draw a compact view of the RAM backing store on the RAM canvas.
 
@@ -1634,8 +2020,7 @@ class UserInterface:
             ram = getattr(self, 'ram_obj', None)
             if canvas is None or ram is None:
                 return
-            canvas.delete('all')
-            # determine number of line entries to show (group by RAM.line_size)
+            # build list of lines to show
             try:
                 line = max(1, int(getattr(ram, 'line_size', 1)))
             except Exception:
@@ -1644,44 +2029,9 @@ class UserInterface:
                 total_lines = max(1, ram.size // line)
             except Exception:
                 total_lines = 1
-            MAX_LINES = 64
+            MAX_LINES = 256
             show_lines = min(MAX_LINES, total_lines)
-            # layout: columns x rows
-            cols = 8
-            rows = (show_lines + cols - 1) // cols
-            # canvas sizing
-            try:
-                w = int(canvas.winfo_width()) or 600
-            except Exception:
-                w = 600
-            try:
-                h = int(canvas.winfo_height()) or 120
-            except Exception:
-                h = 120
-            margin = 6
-            # compute per-cell width: avoid extremely wide cells by capping
-            raw_w = max(48, (w - 2 * margin) // cols)
-            cell_w = max(48, min(96, raw_w))
-            cell_h = max(12, (h - 2 * margin) // max(1, rows))
-            # if canvas is too short to show all rows, expand its height so all
-            # lines (up to MAX_LINES) are visible without clipping; otherwise
-            # configure scrollregion so the vertical scrollbar can scroll.
-            try:
-                needed_h = rows * cell_h + 2 * margin
-                if h < needed_h:
-                    try:
-                        canvas.config(height=needed_h)
-                        h = needed_h
-                    except Exception:
-                        pass
-                # always set scrollregion to cover the drawn area
-                try:
-                    canvas.configure(scrollregion=(0, 0, w, max(h, rows * cell_h + 2 * margin)))
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            # draw cells
+
             # purge expired recent-access markers and build a map for fast lookup
             try:
                 now = time.time()
@@ -1691,84 +2041,96 @@ class UserInterface:
             recent_map = {}
             try:
                 for (b, w, e) in getattr(self, '_recent_ram_accesses', []):
-                    # w may be a bool (is_write) or a color string
                     if b not in recent_map:
                         recent_map[b] = w
-                    else:
-                        # If existing entry is a color, keep it. If new is a color, prefer new.
-                        try:
-                            if isinstance(w, str):
-                                recent_map[b] = w
-                            else:
-                                # both bools: prefer write=True
-                                existing = recent_map[b]
-                                if isinstance(existing, str):
-                                    # keep color
-                                    pass
-                                else:
-                                    recent_map[b] = existing or w
-                        except Exception:
-                            recent_map[b] = w
             except Exception:
                 recent_map = {}
 
-            for i in range(show_lines):
-                addr = i * line
-                try:
-                    val = ram.read(addr)
-                except Exception:
-                    val = 0
-                col = i % cols
-                row = i // cols
-                x = margin + col * cell_w
-                y = margin + row * cell_h
-                try:
-                    # choose background color: highlighted if recently accessed
-                    if addr in recent_map:
-                        marker = recent_map.get(addr)
-                        # marker may be color string or bool
-                        if isinstance(marker, str):
-                            fill = marker
-                            text_color = '#FFFFFF'
-                        else:
-                            is_write = bool(marker)
-                            # vivid colors: red for writes, green for reads
-                            if is_write:
-                                fill = '#F44336'
-                                text_color = '#FFFFFF'
-                            else:
-                                fill = '#2E7D32'
-                                text_color = '#FFFFFF'
-                    else:
-                        fill = '#111111'
-                        text_color = '#DDDDDD'
-                    canvas.create_rectangle(x, y, x + cell_w - 4, y + cell_h - 4, fill=fill, outline='#333333')
-                    # store bbox for potential animation (x1,y1,x2,y2)
-                    try:
-                        self._ram_cell_bboxes[addr] = (x, y, x + cell_w - 4, y + cell_h - 4)
-                    except Exception:
-                        pass
-                    # if this RAM line maps to any cache frame, draw an outline to indicate mapping
-                    try:
-                        # show mapping outline only when this RAM line was recently
-                        # involved in a memory access (mem_read/mem_write). This
-                        # avoids always-highlighting mapped lines and follows the
-                        # user's request to only color on actual reads/writes.
-                        if addr in recent_map and getattr(self, '_last_mapped_ram_bases', None) and addr in self._last_mapped_ram_bases:
-                            canvas.create_rectangle(x+2, y+2, x + cell_w - 6, y + cell_h - 6, fill='', outline='#FFD54F', width=2)
-                    except Exception:
-                        pass
-                    # center the address text for better appearance when cells are narrow/wide
-                    canvas.create_text(x + (cell_w - 4) / 2, y + cell_h / 2, text=f"{addr:#04x}", fill=text_color, font=(self.font_container, 9, 'bold'))
-                except Exception:
-                    pass
-            # ensure scrollbar is visible/updated
+            # create widgets if not present or size changed
             try:
-                if getattr(self, 'ram_vscroll', None):
+                if not getattr(self, 'ram_line_entries', None) or len(self.ram_line_entries) != show_lines:
+                    # destroy existing
+                    for ent in getattr(self, 'ram_line_entries', []) or []:
+                        try:
+                            frm = ent.get('frame')
+                            if hasattr(frm, 'destroy'):
+                                frm.destroy()
+                        except Exception:
+                            pass
+                    self.ram_line_entries = []
+                    self._ram_base_to_index = {}
+                    for i in range(show_lines):
+                        try:
+                            base = i * line
+                            row_frm = ttk.Frame(self.ram_list_inner, padding=(2, 2))
+                            row_frm.grid(row=i, column=0, sticky='ew', pady=1)
+                            # show the RAM line index (0-based) so numbering matches cache lines
+                            addr_lbl = tk.Label(row_frm, text=f"#{i}", width=8, bg='#111111', fg='#CCCCCC', relief='ridge')
+                            addr_lbl.pack(side='left', padx=(2, 8))
+                            bytes_frame = ttk.Frame(row_frm)
+                            bytes_frame.pack(side='left', fill='x', expand=True)
+                            b_labels = []
+                            for off in range(line):
+                                bl = tk.Label(bytes_frame, text='--', width=6, bg='#222222', fg='#DDDDDD', relief='groove')
+                                bl.pack(side='left', padx=2)
+                                b_labels.append(bl)
+                            marker_lbl = tk.Label(row_frm, text='', width=2, bg='#111111', fg='#FFFFFF')
+                            marker_lbl.pack(side='right', padx=(8, 2))
+                            ent = {'frame': row_frm, 'addr': base, 'addr_label': addr_lbl, 'byte_labels': b_labels, 'marker': marker_lbl}
+                            self.ram_line_entries.append(ent)
+                            self._ram_base_to_index[base] = i
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # populate values and highlight recent accesses
+            try:
+                for ent in self.ram_line_entries:
                     try:
-                        self.ram_vscroll.update()
+                        base = ent.get('addr')
+                        bytes_labels = ent.get('byte_labels', [])
+                        marker = ent.get('marker')
+                        is_recent = base in recent_map
+                        # set background color
+                        bg = '#111111'
+                        txt_color = '#DDDDDD'
+                        if is_recent:
+                            m = recent_map.get(base)
+                            if isinstance(m, str):
+                                bg = m; txt_color = '#FFFFFF'
+                            else:
+                                bg = '#F44336' if bool(m) else '#2E7D32'; txt_color = '#FFFFFF'
+                        try:
+                            ent.get('addr_label').configure(bg=bg, fg=txt_color)
+                        except Exception:
+                            pass
+                        # populate byte values
+                        for off, bl in enumerate(bytes_labels):
+                            try:
+                                val = ram.read(base + off)
+                                bl.configure(text=f"{val:#02x}", bg='#333333', fg='#FFFFFF')
+                            except Exception:
+                                try:
+                                    bl.configure(text='--', bg='#222222', fg='#DDDDDD')
+                                except Exception:
+                                    pass
+                        # show mapping outline if base is in last mapped bases
+                        try:
+                            if getattr(self, '_last_mapped_ram_bases', None) and base in self._last_mapped_ram_bases:
+                                marker.configure(text='M')
+                            else:
+                                marker.configure(text='')
+                        except Exception:
+                            pass
                     except Exception:
                         pass
+            except Exception:
+                pass
+
+            # update scrollbar (no-op: canvas.bind handlers keep scrollregion updated)
+            try:
+                self.ram_canvas.update_idletasks()
             except Exception:
                 pass
         except Exception:
@@ -1848,43 +2210,6 @@ class UserInterface:
         wrapper.build()
         self.cache_wrapper = wrapper
         # also set self.cache for compatibility with other code
-        self.cache = wrapper
-        # create labels sized to the core cache's number of blocks if available
-        try:
-            nb = getattr(self.cache, 'num_blocks', None) or (getattr(self.cache, 'cache').num_blocks if hasattr(self.cache, 'cache') else None)
-            if nb is None:
-                nb = max(1, int(self.cache_size.get()))
-        except Exception:
-            nb = max(1, int(self.cache_size.get()))
-        self.create_frame_labels(nb)
-        try:
-            self.update_replacement_controls()
-        except Exception:
-            pass
-        try:
-            self.update_rep_set_choices()
-            self.update_replacement_panel()
-        except Exception:
-            pass
-
-    def fully_associative_algorithm(self):
-        # choose associativity equal to number of blocks where possible
-        try:
-            raw_cache_size = max(1, int(self.cache_size.get()))
-            line_size = max(1, int(self.line_size.get()))
-            num_blocks = max(1, raw_cache_size // line_size)
-            nb = num_blocks
-        except Exception:
-            nb = max(1, int(self.cache_size.get()))
-        self.associativity.set(nb)
-        self.cache_type.set('Fully-Associative')
-        try:
-            self._ensure_ram_object()
-        except Exception:
-            pass
-        wrapper = K_associative_cache(self, associativity=nb)
-        wrapper.build()
-        self.cache_wrapper = wrapper
         self.cache = wrapper
         try:
             nb = getattr(self.cache, 'num_blocks', None) or (getattr(self.cache, 'cache').num_blocks if hasattr(self.cache, 'cache') else None)
@@ -2353,6 +2678,98 @@ class UserInterface:
                 self._recent_ram_accesses = [(b, w, e) for (b, w, e) in self._recent_ram_accesses if e > now]
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def _display_last_read(self, info: dict):
+        """Set the last-read display from the provided access info.
+
+        Prefer showing a value stored in a cache block (so reads reflect
+        cached dirty data). If not available, fall back to the RAM backing
+        store. If neither is available, show 'N/A'.
+        """
+        if info is None:
+            return
+        if info.get('is_write'):
+            return
+        addr = info.get('address')
+        if addr is None:
+            return
+        try:
+            addr = int(addr)
+        except Exception:
+            return
+
+        val = None
+        try:
+            core = self.get_core_cache()
+        except Exception:
+            core = None
+
+        # Attempt to read from cache block data first
+        try:
+            line_size = getattr(core, 'line_size', None) or max(1, int(self.line_size.get()))
+        except Exception:
+            try:
+                line_size = max(1, int(self.line_size.get()))
+            except Exception:
+                line_size = 1
+
+        try:
+            block_addr = addr // line_size
+            offset = addr % line_size
+        except Exception:
+            block_addr = None
+            offset = 0
+
+        try:
+            if core is not None and hasattr(core, 'num_sets') and hasattr(core, 'sets') and block_addr is not None:
+                num_sets = getattr(core, 'num_sets', 1) or 1
+                set_index = block_addr % num_sets
+                tag = block_addr // num_sets
+                if 0 <= set_index < len(core.sets):
+                    # search for a way with matching tag
+                    for w in range(len(core.sets[set_index])):
+                        candidate = core.sets[set_index][w]
+                        try:
+                            if getattr(candidate, 'valid', False) and getattr(candidate, 'tag', None) == tag:
+                                if getattr(candidate, 'data', None) is not None:
+                                    try:
+                                        val = candidate.data[offset]
+                                    except Exception:
+                                        val = None
+                                break
+                        except Exception:
+                            continue
+        except Exception:
+            val = None
+
+        # fallback to RAM
+        if val is None:
+            try:
+                ram = getattr(self, 'ram_obj', None)
+                if ram is None:
+                    if getattr(self, 'last_read_value', None) is not None:
+                        try:
+                            self.last_read_value.set('N/A')
+                        except Exception:
+                            pass
+                    return
+                try:
+                    val = ram.read(addr)
+                except Exception:
+                    val = None
+            except Exception:
+                val = None
+
+        try:
+            if val is None:
+                self.last_read_value.set('N/A')
+            else:
+                try:
+                    self.last_read_value.set(f"{int(val)} (0x{int(val):02x})")
+                except Exception:
+                    self.last_read_value.set(str(val))
         except Exception:
             pass
 
@@ -2833,6 +3250,39 @@ class UserInterface:
         except Exception:
             pass
 
+    def _prepare_value_tokens(self):
+        """Parse the Write values entry into a list of integer values for manual writes."""
+        try:
+            text = (self.write_values.get() or '').strip() if getattr(self, 'write_values', None) is not None else ''
+            if not text:
+                self._value_tokens = []
+                self._value_index = 0
+                self._value_raw_tokens = []
+                return
+            raw = [t.strip() for part in text.split(',') for t in part.split() if t.strip()]
+            self._value_raw_tokens = list(raw)
+            vals = []
+            for t in raw:
+                try:
+                    v = int(t, 0)
+                except Exception:
+                    try:
+                        v = int(t)
+                    except Exception:
+                        # skip invalid tokens
+                        continue
+                vals.append(int(v))
+            # enforce reasonable limit
+            if len(vals) > MAX_INPUT_TOKENS:
+                vals = vals[:MAX_INPUT_TOKENS]
+                self._append_log(f"Write values truncated to first {MAX_INPUT_TOKENS} tokens")
+            self._value_tokens = vals
+            self._value_index = 0
+        except Exception:
+            self._value_tokens = []
+            self._value_index = 0
+            self._value_raw_tokens = []
+
     def _consume_manual_token(self, is_write: bool):
         """Consume next manual token and perform a single access (read or write).
 
@@ -2864,7 +3314,39 @@ class UserInterface:
                 self._append_log('No simulator available for manual access')
                 return None
 
-            sim.load_sequence([addr], writes=[is_write])
+            # If this is a manual write, consume the first write value token (if any)
+            # and keep it so we can reuse it after the simulator step (avoid
+            # consuming tokens twice).
+            write_val = None
+            if is_write:
+                try:
+                    if not getattr(self, '_value_tokens', None):
+                        self._prepare_value_tokens()
+                except Exception:
+                    pass
+                try:
+                    if getattr(self, '_value_tokens', None) and len(self._value_tokens) > 0:
+                        try:
+                            write_val = int(self._value_tokens.pop(0))
+                        except Exception:
+                            write_val = None
+                except Exception:
+                    write_val = None
+                # update the write_values entry to remove the consumed raw token
+                try:
+                    if getattr(self, '_value_raw_tokens', None):
+                        remaining = self._value_raw_tokens[1:]
+                        try:
+                            self.write_values.set(','.join(remaining))
+                        except Exception:
+                            pass
+                        self._value_raw_tokens = remaining
+                except Exception:
+                    pass
+
+            # pass the consumed write value (may be None) into the simulator so
+            # the cache/core can apply it immediately to cache.block.data.
+            sim.load_sequence([addr], writes=[is_write], values=[write_val])
             info = sim.step()
             if info:
                 action = 'W' if info.get('is_write') else 'R'
@@ -2874,22 +3356,20 @@ class UserInterface:
                     self.update_cache_display(info)
                 except Exception:
                     pass
-                # record RAM access (for highlighting) and refresh RAM display after manual access
-                # Only highlight RAM when the simulator actually performed a memory
-                # read or write (mem_read/mem_write). This prevents always-highlighting
-                # on hits that are served entirely from cache.
+                # record RAM access (for highlighting) and refresh RAM view when needed
                 try:
                     mem_read = bool(info.get('mem_read')) if info.get('mem_read') is not None else False
                     mem_write = bool(info.get('mem_write')) if info.get('mem_write') is not None else False
-                    if mem_read or mem_write:
-                        try:
-                            self._note_ram_access(info.get('address'), info.get('is_write'))
-                        except Exception:
-                            pass
+                except Exception:
+                    mem_read = False
+                    mem_write = False
+                if mem_read or mem_write:
                     try:
-                        self.update_ram_display()
+                        self._note_ram_access(info.get('address'), info.get('is_write'))
                     except Exception:
                         pass
+                try:
+                    self.update_ram_display()
                 except Exception:
                     pass
                 # update hit-rate history and redraw small chart (same logic as animation step)
@@ -2909,6 +3389,54 @@ class UserInterface:
                         pass
                 except Exception:
                     pass
+
+                # If this was a manual write, apply the same consumed write value
+                # to RAM if the simulator indicated an immediate memory write
+                # (write-through) or an eviction write was performed.
+                if is_write:
+                    try:
+                        val = write_val
+                        # Only write through to RAM if the simulator performed a memory write
+                        # (e.g. write-through policy or an eviction write). For write-back
+                        # cases where the block becomes dirty, the RAM write should be
+                        # deferred until eviction and therefore we must NOT write here.
+                        if val is not None and getattr(self, 'ram_obj', None) is not None and bool(mem_write):
+                            try:
+                                line_size = max(1, int(getattr(self.ram_obj, 'line_size', 1)))
+                            except Exception:
+                                line_size = 1
+                            try:
+                                base = (int(addr) // line_size) * line_size
+                            except Exception:
+                                try:
+                                    base = int(addr)
+                                except Exception:
+                                    base = None
+                            try:
+                                if base is not None:
+                                    self.ram_obj.write(base, val)
+                                    # visually note the RAM write
+                                    try:
+                                        self._note_ram_access(base, True)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        # consume the used raw token from the entry box and update state
+                        try:
+                            if getattr(self, '_value_raw_tokens', None):
+                                remaining = self._value_raw_tokens[1:]
+                                try:
+                                    self.write_values.set(','.join(remaining))
+                                except Exception:
+                                    pass
+                                self._value_raw_tokens = remaining
+                                # reset parsed tokens so future writes reparse
+                                self._value_tokens = []
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             # update the input box to remove the consumed raw token
             try:
                 remaining = self._manual_raw_tokens[self._manual_index:]

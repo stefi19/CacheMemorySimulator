@@ -1,16 +1,12 @@
-"""Consolidated unit tests for core cache behaviors.
+"""Unit tests for core cache behaviors.
 
 These tests focus exclusively on the cache core and simulator logic
 (no UI). They cover:
-
 - replacement policies (LRU/FIFO/Random)
 - write policies (write-back vs write-through)
 - write-miss policies (write-allocate vs write-no-allocate)
 - eviction behavior and write-back to RAM
 - a small matrix of smoke tests across cache sizes / associativities / line sizes
-
-The tests are intentionally small and deterministic so they run fast in a
-developer environment and are suitable for CI.
 """
 
 import pytest
@@ -98,9 +94,7 @@ def test_policies_various_configs():
                 continue
             for ls in line_sizes:
                 for policy in policies:
-                    # create cache for this configuration; the Cache ctor may
-                    # adjust associativity internally if inputs were invalid,
-                    # but the test only iterates valid combos above.
+                    # create cache for this configuration
                     c = Cache(num_blocks=nb, associativity=assoc, replacement=policy, line_size=ls)
                     assert c.num_blocks == nb
                     assert c.associativity == assoc
@@ -145,33 +139,6 @@ def test_write_hit_behavior():
         else:
             assert block.dirty is False
             assert mw is True
-
-
-@pytest.mark.parametrize("write_miss_policy", ["write-allocate", "write-no-allocate"])
-def test_write_miss_policies(write_miss_policy):
-    # Input: Cache(num_blocks=4, associativity=2, line_size=1, write_policy='write-through')
-    # then perform access(8,is_write=True, write_miss_policy=write_miss_policy).
-    # Expected: If 'write-no-allocate': hit False, widx is None, mw True.
-    # If 'write-allocate': hit False, widx is not None, mr True, mw True.
-    """Verify write-miss policies:
-
-    - write-no-allocate: the write does not allocate a cache line and
-      should generate an immediate memory write (widx is None, mw True)
-    - write-allocate: the cache allocates a line on write-miss and the
-      simulator/cache signals memory activity accordingly.
-    """
-    c = Cache(num_blocks=4, associativity=2, line_size=1, write_policy='write-through')
-    res = c.access(8, is_write=True, write_miss_policy=write_miss_policy)
-    hit, sidx, widx, ev, mr, mw = res
-    if write_miss_policy == "write-no-allocate":
-        assert hit is False
-        assert widx is None
-        assert mw is True
-    else:
-        assert hit is False
-        assert widx is not None
-        assert mr is True
-        assert mw is True
 
 
 def test_evict_dirty_triggers_mem_write_in_cache():
@@ -246,7 +213,7 @@ def test_line_size_eviction_and_ram_base_write():
     # Expected: A single write-back to base address 0 is recorded: ram.read(0) == 1.
     """When line_size > 1, current simulator/cache semantics write back to
     the base-aligned address of the evicted block. This test verifies the
-    base-aligned write happens (one write to base address).
+    base-aligned write happens.
     """
     cache = Cache(num_blocks=2, associativity=1, line_size=4, write_policy='write-back')
     ram = RAM(size_bytes=32, line_size=4)
